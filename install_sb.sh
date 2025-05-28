@@ -4,7 +4,7 @@
 # Description: One-click script to set up Go environment, compile, and run Sing-box manager (sb.go).
 #
 # Usage:
-#   1. Save this content as install_sb.sh.
+#   1. Save this content as install_sb.sh
 #   2. Grant execute permission: chmod +x install_sb.sh
 #   3. Run the script: sudo ./install_sb.sh
 
@@ -16,81 +16,112 @@ YELLOW='\033[0;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+BOLD='\033[1m'
+WHITE='\033[0;37m'
 
 clear
-echo -e "${CYAN}--- Sing-box Manager (Go) Automated Installation Script ---${NC}"
+echo -e "${CYAN}${BOLD}--- Sing-box Manager (Go) Automated Installation Script ---${NC}"
 echo -e "${CYAN}--- https://github.com/SagerNet/sing-box ---${NC}"
-echo -e "${CYAN}--- Script Version: 1.0 ---${NC}"
+echo -e "${CYAN}--- Script Version: 3.9.5 (Improved Sing-box Version Parsing) ---${NC}"
 echo ""
+
+# Function to display progress messages
+log_info() {
+    echo -e "${CYAN}INFO: ${1}${NC}"
+}
+
+log_success() {
+    echo -e "${GREEN}SUCCESS: ${1}${NC}"
+}
+
+log_warn() {
+    echo -e "${YELLOW}WARN: ${1}${NC}"
+}
+
+log_error() {
+    echo -e "${RED}ERROR: ${1}${NC}" >&2
+}
 
 # --- 1. Check for Root Privileges ---
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}Error: This script must be run as root. Please use sudo ./install_sb.sh${NC}"
+   log_error "This script must be run as root. Please use: sudo ./install_sb.sh"
    exit 1
 fi
 
-echo -e "${YELLOW}Updating system package list and upgrading...${NC}"
-apt update && apt upgrade -y
-echo -e "${GREEN}System update completed.${NC}"
+log_info "Starting system update and upgrade..."
+if apt update -y && apt upgrade -y; then
+    log_success "System update and upgrade completed successfully."
+else
+    log_error "System update/upgrade failed. Check internet connection and apt sources."
+    exit 1
+fi
 
 # --- 2. Check and Install Go Language Environment ---
+log_info "Checking Go Language Environment..."
 if command -v go &> /dev/null; then
-    echo -e "${GREEN}Go language is already installed: $(go version)${NC}"
+    log_success "Go language is already installed: $(go version)"
 else
-    echo -e "${YELLOW}Go language not found, downloading and installing latest stable Go...${NC}"
+    log_warn "Go language not found. Downloading and installing latest stable Go..."
 
-    # Get system architecture
     ARCH=$(dpkg --print-architecture)
+    GO_ARCH=""
     case "$ARCH" in
         amd64) GO_ARCH="amd64" ;;
         arm64) GO_ARCH="arm64" ;;
-        *) echo -e "${RED}Unsupported architecture: ${ARCH}. Please install Go manually.${NC}"; exit 1 ;;
+        *) log_error "Unsupported architecture: ${ARCH}. Please install Go manually."; exit 1 ;;
     esac
 
-    # Get latest Go version download link
-    GO_URL=$(wget -qO- https://go.dev/dl/ | grep -oP "go[0-9\.]+\.linux-${GO_ARCH}\.tar\.gz" | head -n 1)
+    GO_URL=$(curl -s https://go.dev/dl/ | grep -oP "go[0-9\.]+\.linux-${GO_ARCH}\.tar\.gz" | head -n 1)
     if [ -z "$GO_URL" ]; then
-        echo -e "${RED}Error: Could not retrieve latest Go language download link. Please check go.dev/dl manually.${NC}"
+        log_error "Could not retrieve latest Go language download link. Check go.dev/dl manually."
         exit 1
     fi
     GO_FULL_URL="https://go.dev/dl/${GO_URL}"
     GO_VERSION=$(echo "$GO_URL" | grep -oP "go[0-9\.]+" | sed 's/go//')
 
-    echo -e "${YELLOW}Downloading Go ${GO_VERSION} (${GO_FULL_URL})...${NC}"
+    log_info "Downloading Go ${GO_VERSION} for ${ARCH} from ${GO_FULL_URL}..."
     mkdir -p /tmp/go_install
-    wget -O /tmp/go_install/go.tar.gz "$GO_FULL_URL"
+    if command -v curl &> /dev/null && command -v pv &> /dev/null; then
+        CONTENT_LENGTH=$(curl -sLI "$GO_FULL_URL" | grep -i Content-Length | awk '{print $2}' | tr -d '\r\n')
+        curl -L "$GO_FULL_URL" | pv -pefs "${CONTENT_LENGTH:-0}" > /tmp/go_install/go.tar.gz || { log_error "Go download failed (curl+pv)."; exit 1; }
+    elif command -v wget &> /dev/null; then
+        wget --show-progress -O /tmp/go_install/go.tar.gz "$GO_FULL_URL" || { log_error "Go download failed (wget)."; exit 1; }
+    else
+        log_error "Neither curl nor wget found. Install one to proceed or download Go manually."
+        exit 1
+    fi
+    log_success "Go download complete."
 
-    echo -e "${YELLOW}Installing Go...${NC}"
-    rm -rf /usr/local/go # Remove old Go installation
-    tar -C /usr/local -xzf /tmp/go_install/go.tar.gz
+    log_info "Installing Go to /usr/local..."
+    rm -rf /usr/local/go
+    if ! tar -C /usr/local -xzf /tmp/go_install/go.tar.gz; then
+        log_error "Go extraction failed."
+        exit 1
+    fi
 
-    # Configure Go environment variables (persist to /etc/profile.d/)
     GO_PROFILE_PATH="/etc/profile.d/go_env.sh"
     echo "export PATH=\$PATH:/usr/local/go/bin" | tee "$GO_PROFILE_PATH" > /dev/null
     echo "export GOPATH=\$HOME/go" | tee -a "$GO_PROFILE_PATH" > /dev/null
     echo "export PATH=\$PATH:\$GOPATH/bin" | tee -a "$GO_PROFILE_PATH" > /dev/null
 
-    # Make environment variables effective immediately for current shell
+    # shellcheck source=/dev/null
     source "$GO_PROFILE_PATH"
     export PATH="$PATH:/usr/local/go/bin"
     export GOPATH="$HOME/go"
     export PATH="$PATH:$GOPATH/bin"
 
-    echo -e "${GREEN}Go language installation complete: $(go version)${NC}"
+    log_success "Go language installation complete: $(go version)"
     rm -rf /tmp/go_install
 fi
 
 # --- 3. Prepare Go Project Directory and Write sb.go File ---
-echo -e "${YELLOW}Creating Sing-box manager project directory...${NC}"
-PROJECT_DIR="/home/sb_manager_go" # Place under /home for easier management
+log_info "Setting up Sing-box Manager Project..."
+PROJECT_DIR="/opt/sb_manager_go"
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-echo -e "${YELLOW}Writing sb.go script content...${NC}"
-# --- START OF SB.GO CONTENT ---
-# Using 'EOF_GO_CODE' with single quotes to prevent shell interpretation of Go code content.
+log_info "Writing sb.go script content..."
 cat << 'EOF_GO_CODE' > sb.go
-// sb.go
 package main
 
 import (
@@ -106,13 +137,13 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -131,7 +162,7 @@ const (
 	systemdServiceFile = "/etc/systemd/system/sing-box.service"
 	defaultSNI         = "www.bing.com"
 	realitySNI         = "www.bing.com"
-	defaultUserAgent   = "sb-manager-go/3.9"
+	defaultUserAgent   = "sb-manager-go/3.9.5" // User agent for HTTP requests
 	installConfigFile  = "/etc/s-box/install_data.json"
 	acmeBaseDir        = "/etc/s-box/acme"
 	cliCommandName     = "sb"
@@ -146,30 +177,45 @@ const (
 	ColorPurple = "\033[35m"
 	ColorCyan   = "\033[36m"
 	ColorWhite  = "\033[37m"
+	ColorBold   = "\033[1m"
 )
 
-// SingBoxLogConfig defines the log configuration for Sing-box.
+func logInfo(format string, a ...interface{}) {
+	fmt.Printf(ColorCyan+"INFO: "+format+ColorReset+"\n", a...)
+}
+
+func logSuccess(format string, a ...interface{}) {
+	fmt.Printf(ColorGreen+"SUCCESS: "+format+ColorReset+"\n", a...)
+}
+
+func logWarn(format string, a ...interface{}) {
+	fmt.Printf(ColorYellow+"WARN: "+format+ColorReset+"\n", a...)
+}
+
+func logError(format string, a ...interface{}) {
+	fmt.Fprintf(os.Stderr, ColorRed+"ERROR: "+format+ColorReset+"\n", a...)
+}
+
 type SingBoxLogConfig struct {
 	Disabled  bool   `json:"disabled"`
 	Level     string `json:"level"`
 	Timestamp bool   `json:"timestamp"`
 }
 
-// SingBoxUser defines a user for Sing-box inbounds.
 type SingBoxUser struct {
 	UUID     string `json:"uuid,omitempty"`
 	Flow     string `json:"flow,omitempty"`
 	AlterID  int    `json:"alterId,omitempty"`
 	Password string `json:"password,omitempty"`
+	Method   string `json:"method,omitempty"`
+	Username string `json:"username,omitempty"`
 }
 
-// SingBoxRealityHandshake defines the handshake configuration for VLESS Reality.
 type SingBoxRealityHandshake struct {
 	Server     string `json:"server"`
 	ServerPort uint16 `json:"server_port"`
 }
 
-// SingBoxRealityConfig defines the Reality configuration for VLESS.
 type SingBoxRealityConfig struct {
 	Enabled    bool                    `json:"enabled"`
 	Handshake  SingBoxRealityHandshake `json:"handshake"`
@@ -177,7 +223,6 @@ type SingBoxRealityConfig struct {
 	ShortID    []string                `json:"short_id"`
 }
 
-// SingBoxTLSConfig defines TLS settings for inbounds.
 type SingBoxTLSConfig struct {
 	Enabled         bool                  `json:"enabled"`
 	ServerName      string                `json:"server_name,omitempty"`
@@ -187,7 +232,6 @@ type SingBoxTLSConfig struct {
 	ALPN            []string              `json:"alpn,omitempty"`
 }
 
-// SingBoxTransportConfig defines transport settings (e.g., WebSocket).
 type SingBoxTransportConfig struct {
 	Type                string `json:"type"`
 	Path                string `json:"path,omitempty"`
@@ -195,7 +239,6 @@ type SingBoxTransportConfig struct {
 	EarlyDataHeaderName string `json:"early_data_header_name,omitempty"`
 }
 
-// SingBoxInbound defines an inbound listener.
 type SingBoxInbound struct {
 	Type                     string                  `json:"type"`
 	Tag                      string                  `json:"tag"`
@@ -203,33 +246,30 @@ type SingBoxInbound struct {
 	ListenPort               uint16                  `json:"listen_port"`
 	Sniff                    bool                    `json:"sniff"`
 	SniffOverrideDestination bool                    `json:"sniff_override_destination"`
-	Users                    []SingBoxUser           `json:"users"`
+	Users                    []SingBoxUser           `json:"users,omitempty"`
 	TLS                      *SingBoxTLSConfig       `json:"tls,omitempty"`
 	Transport                *SingBoxTransportConfig `json:"transport,omitempty"`
 	CongestionControl        string                  `json:"congestion_control,omitempty"`
 	IgnoreClientBandwidth    bool                    `json:"ignore_client_bandwidth,omitempty"`
+	Method                   string                  `json:"method,omitempty"`
 }
 
-// SingBoxOutbound defines an outbound proxy.
 type SingBoxOutbound struct {
 	Type           string `json:"type"`
 	Tag            string `json:"tag"`
 	DomainStrategy string `json:"domain_strategy,omitempty"`
 }
 
-// SingBoxRouteRule defines a routing rule.
 type SingBoxRouteRule struct {
 	Protocol []string `json:"protocol,omitempty"`
 	Network  string   `json:"network,omitempty"`
 	Outbound string   `json:"outbound"`
 }
 
-// SingBoxRouteConfig defines routing settings.
 type SingBoxRouteConfig struct {
 	Rules []SingBoxRouteRule `json:"rules"`
 }
 
-// SingBoxServerConfig is the root configuration for Sing-box.
 type SingBoxServerConfig struct {
 	Log       SingBoxLogConfig   `json:"log"`
 	Inbounds  []SingBoxInbound   `json:"inbounds"`
@@ -237,7 +277,6 @@ type SingBoxServerConfig struct {
 	Route     SingBoxRouteConfig `json:"route"`
 }
 
-// InstallData stores persistent configuration data for the manager.
 type InstallData struct {
 	ServerIP          string            `json:"server_ip"`
 	Hostname          string            `json:"hostname"`
@@ -250,12 +289,16 @@ type InstallData struct {
 	VmessPath         string            `json:"vmess_path"`
 	UseAcmeCert       bool              `json:"use_acme_cert"`
 	AcmeEmail         string            `json:"acme_email,omitempty"`
+	UseSocks5Auth     bool              `json:"use_socks5_auth"`
+	Socks5Username    string            `json:"socks5_username"`
+	Socks5Password    string            `json:"socks5_password"`
 }
 
 var currentInstallData InstallData
 
 func main() {
 	loadInstallData()
+
 	for {
 		printMainMenu()
 		choice := getUserInput(ColorYellow + "Enter your choice: " + ColorReset)
@@ -270,63 +313,57 @@ func main() {
 		case "4":
 			manageCertificates()
 		case "5":
-			generateAndShowSubscription()
+			manageSocks5Auth()
 		case "6":
-			restartSingBoxServiceInteractive()
+			generateAndShowSubscription()
 		case "7":
-			stopSingBoxServiceInteractive()
+			restartSingBoxServiceInteractive()
 		case "8":
-			startSingBoxServiceInteractive()
+			stopSingBoxServiceInteractive()
 		case "9":
-			viewSingBoxLogs()
+			startSingBoxServiceInteractive()
 		case "10":
-			checkSingBoxStatusInteractive()
+			viewSingBoxLogs()
+		case "11":
+			updateSingBoxBinaryAndRestartInteractive()
 		case "0":
-			fmt.Println(ColorGreen + "Exiting." + ColorReset)
+			logSuccess("Exiting.")
 			os.Exit(0)
 		default:
-			fmt.Printf("%sInvalid choice. Please try again.%s\n", ColorRed, ColorReset)
+			logError("Invalid choice. Please try again.")
 		}
-		if choice != "0" && choice != "9" && choice != "10" {
+		if choice != "0" && choice != "10" {
 			fmt.Printf("\n%sPress Enter to continue...%s", ColorYellow, ColorReset)
-			bufio.NewReader(os.Stdin).ReadBytes('\n')
+			_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
 		}
 	}
 }
 
-// clearScreen clears the terminal screen.
 func clearScreen() {
-	cmd := exec.Command("clear")
+	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", "/c", "cls")
+	} else {
+		cmd = exec.Command("clear")
 	}
 	cmd.Stdout = os.Stdout
-	cmd.Run()
+	_ = cmd.Run()
 }
 
-// getSingBoxStatus checks the status of the sing-box systemd service.
 func getSingBoxStatus() (string, bool) {
-	var err error // Declare err once at the top of the function scope
-
-	// Check service file existence
-	if _, err = os.Stat(systemdServiceFile); os.IsNotExist(err) {
+	if _, err := os.Stat(systemdServiceFile); os.IsNotExist(err) {
 		return "Not Installed", false
-	}
-	if err != nil {
+	} else if err != nil {
 		return fmt.Sprintf("Error stating service file: %v", err), false
 	}
 
-	// Check active status
 	cmd := exec.Command("systemctl", "is-active", "sing-box")
-	var output []byte // Declare output explicitly
-	output, err = cmd.Output() // Assign to existing 'err'
+	output, err := cmd.Output()
 	status := strings.TrimSpace(string(output))
 
 	if err != nil {
-		// If is-active fails, check if it's in a failed state
 		failCmd := exec.Command("systemctl", "is-failed", "sing-box")
-		var failOutput []byte
-		failOutput, _ = failCmd.Output() // No 'err' variable from here, _ is used.
+		failOutput, _ := failCmd.Output()
 		failStatus := strings.TrimSpace(string(failOutput))
 		if failStatus == "failed" {
 			return "Failed", false
@@ -337,10 +374,9 @@ func getSingBoxStatus() (string, bool) {
 	if status == "active" {
 		return "Active (Running)", true
 	}
-	return strings.Title(status), false
+	return strings.ToTitle(status), false
 }
 
-// printMainMenu displays the main menu options.
 func printMainMenu() {
 	clearScreen()
 	statusText, isRunning := getSingBoxStatus()
@@ -353,47 +389,39 @@ func printMainMenu() {
 
 	managerTitle := fmt.Sprintf("%sSing-box Manager (%s)%s", ColorCyan, cliCommandName, ColorReset)
 	statusLine := fmt.Sprintf("%sStatus: %s%s", statusColor, statusText, ColorReset)
-	fmt.Printf("\n--- %s --- %s ---\n", managerTitle, statusLine)
+	fmt.Printf("\n%s--- %s --- %s ---\n%s", ColorBold, managerTitle, statusLine, ColorReset)
+
+	fmt.Printf("\n%s--- Key File Locations ---%s\n", ColorBlue, ColorReset)
+	fmt.Printf("  %sBinary: %s%s\n", ColorGreen, singBoxBinary, ColorReset)
+	fmt.Printf("  %sConfig: %s%s\n", ColorGreen, singBoxConfig, ColorReset)
+	fmt.Printf("  %sService: %s%s\n", ColorGreen, systemdServiceFile, ColorReset)
+	fmt.Printf("  %sInstall Data: %s%s\n", ColorGreen, installConfigFile, ColorReset)
+	fmt.Printf(strings.Repeat("-", 60) + "\n")
+
 	fmt.Printf("%s1. Install/Reinstall Sing-box%s\n", ColorGreen, ColorReset)
 	fmt.Printf("%s2. Uninstall Sing-box%s\n", ColorRed, ColorReset)
 	fmt.Printf("%s3. Show Nodes%s\n", ColorGreen, ColorReset)
-	fmt.Printf("%s4. Manage Certificates (Switch Self-signed/ACME)%s\n", ColorGreen, ColorReset)
-	fmt.Printf("%s5. Generate & Show Subscription Link%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s--- Configuration Management ---%s\n", ColorBlue, ColorReset)
+	fmt.Printf("%s4. Manage Certificates (Self-signed/ACME)%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s5. Manage Socks5 Authentication%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s6. Generate & Show Subscription Link%s\n", ColorGreen, ColorReset)
 	fmt.Printf("%s--- Service Management ---%s\n", ColorBlue, ColorReset)
-	fmt.Printf("%s6. Restart Sing-box%s\n", ColorYellow, ColorReset)
-	fmt.Printf("%s7. Stop Sing-box%s\n", ColorYellow, ColorReset)
-	fmt.Printf("%s8. Start Sing-box%s\n", ColorYellow, ColorReset)
-	fmt.Printf("%s9. View Sing-box Logs%s\n", ColorYellow, ColorReset)
-	fmt.Printf("%s10. Check Sing-box Status%s\n", ColorCyan, ColorReset)
+	fmt.Printf("%s7. Restart Sing-box%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s8. Stop Sing-box%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s9. Start Sing-box%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s10. View Sing-box Logs%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s11. Update Sing-box Binary%s\n", ColorGreen, ColorReset)
 	fmt.Printf("%s0. Exit%s\n", ColorYellow, ColorReset)
-	fmt.Println(strings.Repeat("-", 50))
+	fmt.Println(strings.Repeat("-", 60))
 }
 
-// checkSingBoxStatusInteractive displays the current Sing-box service status.
-func checkSingBoxStatusInteractive() {
-	fmt.Printf("%sChecking Sing-box service status...%s\n", ColorYellow, ColorReset)
-	statusText, isRunning := getSingBoxStatus()
-	statusColor := ColorYellow
-	if isRunning {
-		statusColor = ColorGreen
-	} else if statusText == "Failed" || statusText == "Not Installed" {
-		statusColor = ColorRed
-	}
-	fmt.Printf("Sing-box Service Status: %s%s%s\n", statusColor, statusText, ColorReset)
-	if !isRunning && statusText != "Not Installed" {
-		fmt.Printf("%sUse option '9' for detailed logs if service failed.%s\n", ColorYellow, ColorReset)
-	}
-}
-
-// getUserInput prompts the user for input and returns the trimmed string.
 func getUserInput(prompt string) string {
 	fmt.Print(prompt)
 	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
-	return strings.TrimSpace(input)
+	inputRaw, _ := reader.ReadString('\n')
+	return strings.TrimSpace(inputRaw)
 }
 
-// runCommand executes a shell command and returns its stdout or an error.
 func runCommand(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	var stdout, stderr bytes.Buffer
@@ -401,94 +429,196 @@ func runCommand(name string, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("command %s %v failed: %w\nStdout: %s\nStderr: %s", name, args, err, strings.ToValidUTF8(stdout.String(), ""), strings.ToValidUTF8(stderr.String(), ""))
+		return "", fmt.Errorf("command '%s %s' failed: %w\nStdout: %s\nStderr: %s", name, strings.Join(args, " "), err, strings.ToValidUTF8(stdout.String(), ""), strings.ToValidUTF8(stderr.String(), ""))
 	}
 	return stdout.String(), nil
 }
 
-// checkRoot ensures the script is run with root privileges.
 func checkRoot() {
 	if os.Geteuid() != 0 {
-		log.Fatalf("%sRoot privileges required.%s", ColorRed, ColorReset)
+		logError("Root privileges required for this operation.")
+		os.Exit(1)
 	}
 }
 
-// checkOS verifies the operating system is Debian-based.
 func checkOS() {
+	logInfo("Performing OS check...")
 	if _, err := os.Stat("/etc/debian_version"); err == nil {
-		fmt.Printf("%sOS check OK (Debian-based).%s\n", ColorGreen, ColorReset)
+		logSuccess("OS check OK (Debian-based).")
 		return
 	}
 
 	b, err := os.ReadFile("/etc/os-release")
 	if err != nil {
-		fmt.Printf("%sWarning: OS check failed: %v%s\n", ColorYellow, err, ColorReset)
-		if strings.ToLower(getUserInput(ColorYellow + "Is this Debian-based? (y/N): " + ColorReset)) != "y" {
-			log.Fatalf("%sOS not confirmed Debian-based.%s", ColorRed, ColorReset)
+		logWarn("OS check failed to read /etc/os-release: %v", err)
+		if strings.ToLower(getUserInput(ColorYellow+"Is this a Debian-based system? (y/N): "+ColorReset)) != "y" {
+			logError("OS not confirmed as Debian-based. Aborting.")
+			os.Exit(1)
 		}
+		logSuccess("OS check manually confirmed as Debian-based.")
 		return
 	}
 	s := string(b)
 	if !strings.Contains(s, "ID_LIKE=debian") && !strings.Contains(s, "ID=debian") && !strings.Contains(s, "ID=ubuntu") {
-		log.Fatalf("%sUnsupported OS.%s", ColorRed, ColorReset)
+		logError("Unsupported OS. This script is primarily for Debian/Ubuntu based systems.")
+		os.Exit(1)
 	}
-	fmt.Printf("%sOS check OK.%s\n", ColorGreen, ColorReset)
+	logSuccess("OS check OK (Debian-based).")
 }
 
-// installDependencies installs necessary system packages.
 func installDependencies() {
-	fmt.Printf("%sUpdating apt...%s\n", ColorYellow, ColorReset)
+	logInfo("Updating apt package lists...")
 	if _, err := runCommand("apt-get", "update", "-y"); err != nil {
-		log.Fatalf("%sApt update failed: %v%s", ColorRed, err, ColorReset)
+		logError("Apt update failed: %v", err)
+		os.Exit(1)
 	}
 	dependencies := []string{"curl", "wget", "jq", "qrencode", "openssl", "iproute2", "iptables", "ca-certificates", "certbot"}
-	fmt.Printf("%sInstalling dependencies: %v%s\n", ColorYellow, dependencies, ColorReset)
+	logInfo("Installing dependencies: %v", dependencies)
+
 	installArgs := []string{"install", "-y"}
 	installArgs = append(installArgs, dependencies...)
-	if _, err := runCommand("apt-get", installArgs...); err != nil {
+	installCmd := exec.Command("apt-get", installArgs...)
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+
+	if err := installCmd.Run(); err != nil {
 		if strings.Contains(err.Error(), "certbot") {
-			fmt.Printf("%sWARN: apt install certbot failed. Try snap: sudo apt install snapd && sudo snap install --classic certbot && sudo ln -s /snap/bin/certbot /usr/bin/certbot%s\n", ColorYellow, ColorReset)
+			logWarn("apt install certbot failed. Attempting to install via snapd...")
+			if _, snapdErr := runCommand("apt-get", "install", "-y", "snapd"); snapdErr != nil {
+				 logWarn("Failed to install snapd: %v. Certbot might need manual installation.", snapdErr)
+			} else {
+				if _, certbotSnapErr := runCommand("snap", "install", "--classic", "certbot"); certbotSnapErr != nil {
+					logWarn("Snap install certbot failed: %v. Manual certbot installation might be required.", certbotSnapErr)
+				} else {
+					_ , linkErr := runCommand("ln", "-sf", "/snap/bin/certbot", "/usr/bin/certbot")
+					if linkErr == nil {
+						logSuccess("Certbot installed via Snap and symlinked.")
+					} else {
+						logWarn("Failed to symlink snap certbot: %v", linkErr)
+					}
+				}
+			}
 		} else {
-			log.Fatalf("%sDependency installation failed: %v%s", ColorRed, err, ColorReset)
+			logError("Dependency installation failed: %v", err)
+			os.Exit(1)
 		}
 	}
-	fmt.Printf("%sDependencies installation attempted.%s\n", ColorGreen, ColorReset)
+	logSuccess("Dependencies installation attempted.")
 	if _, err := exec.LookPath("certbot"); err != nil {
-		fmt.Printf("%sWARN: certbot still not found. Manual install needed for ACME features.%s\n", ColorYellow, ColorReset)
+		logWarn("Certbot command still not found. ACME certificate features may not work. Please install Certbot manually.")
 	} else {
-		fmt.Printf("%sCertbot found and accessible.%s\n", ColorGreen, ColorReset)
+		logSuccess("Certbot found and accessible.")
 	}
 }
 
-// getCPUArch determines the CPU architecture for Sing-box download.
 func getCPUArch() string {
 	arch := runtime.GOARCH
 	if arch == "amd64" || arch == "arm64" {
 		return arch
 	}
-	log.Fatalf("%sArchitecture %s is unsupported.%s", ColorRed, arch, ColorReset)
-	return "" // Should not reach here
+	logError("CPU architecture %s is unsupported by this script's automated download.", arch)
+	os.Exit(1)
+	return ""
 }
 
-// downloadAndInstallSingBox downloads and installs the latest Sing-box binary.
+func getSingBoxVersion() (string, error) {
+	if _, err := os.Stat(singBoxBinary); os.IsNotExist(err) {
+		return "", fmt.Errorf("sing-box binary not found at %s", singBoxBinary)
+	}
+	rawOutput, err := runCommand(singBoxBinary, "version")
+	if err != nil {
+		return "", fmt.Errorf("failed to get sing-box version: %w. Output: %s", err, rawOutput)
+	}
+
+	lines := strings.Split(rawOutput, "\n")
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmedLine, "sing-box version ") {
+			versionPart := strings.TrimPrefix(trimmedLine, "sing-box version ")
+			if firstSpace := strings.Index(versionPart, " "); firstSpace != -1 {
+				return versionPart[:firstSpace], nil
+			}
+			return versionPart, nil 
+		} else if strings.HasPrefix(trimmedLine, "version ") { 
+			versionPart := strings.TrimPrefix(trimmedLine, "version ")
+			if firstSpace := strings.Index(versionPart, " "); firstSpace != -1 {
+				return versionPart[:firstSpace], nil
+			}
+			return versionPart, nil
+		}
+	}
+	
+	if len(lines) > 0 {
+		firstLine := strings.TrimSpace(lines[0])
+		re := regexp.MustCompile(`v?([0-9]+\.[0-9]+\.[0-9]+)`)
+		match := re.FindStringSubmatch(firstLine)
+		if len(match) > 1 {
+			return match[1], nil 
+		}
+	}
+	
+	return "unknown", fmt.Errorf("failed to parse sing-box version from output: %s", rawOutput)
+}
+
+
+func isSingBoxVersionAtLeast(major, minor, patch int) bool {
+	versionStr, err := getSingBoxVersion()
+	if err != nil {
+		logWarn("Could not get Sing-box version for feature check: %v. Assuming feature not supported.", err)
+		return false
+	}
+	if versionStr == "unknown" {
+		logWarn("Sing-box version is 'unknown'. Assuming feature not supported.")
+		return false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(versionStr, "v"), ".")
+	if len(parts) < 3 {
+		logWarn("Malformed Sing-box version string '%s' (expected X.Y.Z). Assuming feature not supported.", versionStr)
+		return false
+	}
+	vMajor, majErr := strconv.Atoi(parts[0])
+	vMinor, minErr := strconv.Atoi(parts[1])
+	vPatch, patErr := strconv.Atoi(parts[2])
+
+	if majErr != nil || minErr != nil || patErr != nil {
+		logWarn("Error parsing Sing-box version parts from '%s'. Assuming feature not supported.", versionStr)
+		return false
+	}
+
+	if vMajor > major { return true }
+	if vMajor < major { return false }
+	if vMinor > minor { return true }
+	if vMinor < minor { return false }
+	return vPatch >= patch
+}
+
+
 func downloadAndInstallSingBox() {
-	fmt.Printf("%sDownloading and installing Sing-box...%s\n", ColorYellow, ColorReset)
+	logInfo("Downloading and installing latest Sing-box...")
 	arch := getCPUArch()
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
+
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/SagerNet/sing-box/releases/latest", nil)
 	if err != nil {
-		log.Fatalf("Failed to create request for releases: %v", err)
+		logError("Failed to create request for GitHub releases: %v", err)
+		os.Exit(1)
 	}
 	req.Header.Set("User-Agent", defaultUserAgent)
-	req.Header.Set("Accept", "application/vnd.github.com.v3+json") // Corrected Accept header
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
 	res, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to fetch release information: %v", err)
+		logError("Failed to fetch release information from GitHub: %v", err)
+		os.Exit(1)
 	}
 	defer res.Body.Close()
+
 	if res.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(res.Body)
-		log.Fatalf("Failed to fetch release status %d: %s", res.StatusCode, string(body))
+		bodyBytes, _ := io.ReadAll(res.Body)
+		logError("GitHub API request failed (Status %d): %s", res.StatusCode, string(bodyBytes))
+		os.Exit(1)
 	}
 
 	var releaseInfo struct {
@@ -499,7 +629,8 @@ func downloadAndInstallSingBox() {
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&releaseInfo); err != nil {
-		log.Fatalf("Failed to parse release JSON: %v", err)
+		logError("Failed to parse GitHub release JSON: %v", err)
+		os.Exit(1)
 	}
 
 	var downloadURL string
@@ -507,217 +638,275 @@ func downloadAndInstallSingBox() {
 	for _, asset := range releaseInfo.Assets {
 		if strings.HasPrefix(asset.Name, "sing-box-") && strings.HasSuffix(asset.Name, suffix) {
 			downloadURL = asset.URL
-			fmt.Printf("%sFound Sing-box asset: %s%s\n", ColorGreen, asset.Name, ColorReset)
+			logInfo("Found Sing-box asset: %s", asset.Name)
 			break
 		}
 	}
 
 	if downloadURL == "" {
-		log.Fatalf("No download URL found for %s architecture in %s release.", arch, releaseInfo.TagName)
+		logError("No download URL found for %s architecture in %s release. Check GitHub releases page.", arch, releaseInfo.TagName)
+		os.Exit(1)
 	}
 
-	fmt.Printf("%sDownloading from %s%s\n", ColorYellow, downloadURL, ColorReset)
-	os.MkdirAll(singBoxDir, 0755)
-	downloadPath := filepath.Join(os.TempDir(), filepath.Base(downloadURL))
+	logInfo("Downloading Sing-box from: %s", downloadURL)
+	if err := os.MkdirAll(singBoxDir, 0755); err != nil {
+		logError("Failed to create Sing-box directory %s: %v", singBoxDir, err)
+		os.Exit(1)
+	}
 
+	downloadPath := filepath.Join(os.TempDir(), filepath.Base(downloadURL))
 	outputFile, err := os.Create(downloadPath)
 	if err != nil {
-		log.Fatalf("Failed to create download file: %v", err)
+		logError("Failed to create temporary download file %s: %v", downloadPath, err)
+		os.Exit(1)
 	}
 
 	downloadResponse, err := client.Get(downloadURL)
 	if err != nil {
-		outputFile.Close()
-		os.Remove(downloadPath)
-		log.Fatalf("Download failed: %v", err)
+		_ = outputFile.Close()
+		_ = os.Remove(downloadPath)
+		logError("Download request failed: %v", err)
+		os.Exit(1)
 	}
 	defer downloadResponse.Body.Close()
 
 	if downloadResponse.StatusCode != http.StatusOK {
-		outputFile.Close()
-		os.Remove(downloadPath)
-		log.Fatalf("Download failed with status %d", downloadResponse.StatusCode)
+		_ = outputFile.Close()
+		_ = os.Remove(downloadPath)
+		logError("Download failed with HTTP status %d", downloadResponse.StatusCode)
+		os.Exit(1)
 	}
 
-	_, err = io.Copy(outputFile, downloadResponse.Body)
-	outputFile.Close()
+	fmt.Printf("%sDownloading Sing-box binary...%s", ColorYellow, ColorReset)
+	bytesWritten, err := io.Copy(outputFile, downloadResponse.Body)
+	fmt.Printf("\n")
+	_ = outputFile.Close()
 	if err != nil {
-		os.Remove(downloadPath)
-		log.Fatalf("Failed to save downloaded content: %v", err)
+		_ = os.Remove(downloadPath)
+		logError("Failed to save downloaded content: %v", err)
+		os.Exit(1)
+	}
+	logSuccess("Downloaded %d bytes to %s.", bytesWritten, downloadPath)
+
+	logInfo("Extracting Sing-box archive...")
+	extractDir := filepath.Join(os.TempDir(), "sb-extract")
+	_ = os.RemoveAll(extractDir)
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		logError("Failed to create extraction directory %s: %v", extractDir, err)
+		_ = os.Remove(downloadPath)
+		os.Exit(1)
 	}
 
-	fmt.Printf("%sExtracting Sing-box...%s\n", ColorYellow, ColorReset)
-	extractDir := filepath.Join(os.TempDir(), "sb-extract")
-	os.RemoveAll(extractDir)
-	os.MkdirAll(extractDir, 0755)
-
-	if _, err := runCommand("tar", "-xzf", downloadPath, "-C", extractDir); err != nil {
-		log.Fatalf("Failed to extract Sing-box archive: %v", err)
+	if _, err := runCommand("tar", "-xzf", downloadPath, "-C", extractDir, "--strip-components=1"); err != nil {
+		logWarn("Failed to extract with --strip-components=1 (%v), trying without...", err)
+		_ = os.RemoveAll(extractDir)
+		if err := os.MkdirAll(extractDir, 0755); err != nil {
+			logError("Failed to re-create extraction directory %s: %v", extractDir, err)
+			_ = os.Remove(downloadPath)
+			os.Exit(1)
+		}
+		if _, err := runCommand("tar", "-xzf", downloadPath, "-C", extractDir); err != nil {
+			logError("Failed to extract Sing-box archive (second attempt): %v", err)
+			_ = os.Remove(downloadPath)
+			_ = os.RemoveAll(extractDir)
+			os.Exit(1)
+		}
 	}
 
 	var binaryPath string
-	filepath.Walk(extractDir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	err = filepath.Walk(extractDir, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil { return walkErr }
 		if !info.IsDir() && info.Name() == "sing-box" {
 			binaryPath = p
-			return filepath.SkipDir // Found the binary, stop walking
+			return filepath.SkipDir
 		}
 		return nil
 	})
+	if err != nil {
+		logError("Error walking extracted files: %v", err)
+	}
 
 	if binaryPath == "" {
-		log.Fatalf("Sing-box binary not found in extracted archive.")
+		logError("Sing-box binary not found in extracted archive at %s.", extractDir)
+		_ = os.Remove(downloadPath)
+		_ = os.RemoveAll(extractDir)
+		os.Exit(1)
 	}
 
 	sourceFile, err := os.Open(binaryPath)
 	if err != nil {
-		log.Fatalf("Failed to open source binary: %v", err)
+		logError("Failed to open source binary %s: %v", binaryPath, err)
+		os.Exit(1)
 	}
 	defer sourceFile.Close()
 
 	destinationFile, err := os.Create(singBoxBinary)
 	if err != nil {
-		log.Fatalf("Failed to create destination binary: %v", err)
+		logError("Failed to create destination binary %s: %v", singBoxBinary, err)
+		os.Exit(1)
 	}
 	defer destinationFile.Close()
 
 	_, err = io.Copy(destinationFile, sourceFile)
 	if err != nil {
-		log.Fatalf("Failed to copy binary to destination: %v", err)
+		logError("Failed to copy binary to %s: %v", singBoxBinary, err)
+		os.Exit(1)
 	}
 
-	os.Chmod(singBoxBinary, 0755) // Make executable
-
-	if err := os.Remove(binaryPath); err != nil {
-		fmt.Printf("%sWARN: Could not remove temporary binary file: %v%s\n", ColorYellow, err, ColorReset)
+	if err := os.Chmod(singBoxBinary, 0755); err != nil {
+		logWarn("Failed to set executable permission on %s: %v", singBoxBinary, err)
 	}
-	os.Remove(downloadPath)
-	os.RemoveAll(extractDir)
 
-	versionOutput, _ := runCommand(singBoxBinary, "version")
-	fmt.Printf("%sSing-box installed: %s%s\n", ColorGreen, strings.TrimSpace(versionOutput), ColorReset)
+	_ = os.Remove(downloadPath)
+	_ = os.RemoveAll(extractDir)
+
+	versionOutput, versionErr := getSingBoxVersion()
+	if versionErr != nil {
+		logWarn("After installation, failed to get Sing-box version: %v", versionErr)
+	}
+	logSuccess("Sing-box installed. Version: %s", strings.TrimSpace(versionOutput))
 }
 
-// generateSelfSignedCert generates and saves a self-signed TLS certificate and key.
 func generateSelfSignedCert() {
-	fmt.Printf("%sGenerating self-signed certificate...%s\n", ColorYellow, ColorReset)
+	logInfo("Generating self-signed certificate for fallback/default TLS...")
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		log.Fatalf("Failed to generate ECDSA private key: %v", err)
+		logError("Failed to generate ECDSA private key: %v", err)
+		os.Exit(1)
 	}
 
 	now := time.Now()
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(now.Unix()),
 		Subject: pkix.Name{
-			CommonName: defaultSNI,
+			CommonName:   defaultSNI,
+			Organization: []string{"Sing-box Manager SelfSigned"},
 		},
 		NotBefore: now,
-		NotAfter:  now.AddDate(10, 0, 0), // Valid for 10 years
+		NotAfter:  now.AddDate(10, 0, 0),
 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:              []string{defaultSNI},
 		BasicConstraintsValid: true,
-		IsCA:                  true, // Mark as CA for self-signed
+		IsCA:                  true,
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		log.Fatalf("Failed to create certificate: %v", err)
+		logError("Failed to create certificate: %v", err)
+		os.Exit(1)
 	}
 
 	certOut, err := os.Create(selfSignedCert)
 	if err != nil {
-		log.Fatalf("Failed to open self-signed certificate file for writing: %v", err)
+		logError("Failed to open %s for writing: %v", selfSignedCert, err)
+		os.Exit(1)
 	}
 	defer certOut.Close()
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		logError("Failed to write certificate PEM data: %v", err)
+		os.Exit(1)
+	}
 
 	keyOut, err := os.Create(selfSignedKey)
 	if err != nil {
-		log.Fatalf("Failed to open self-signed key file for writing: %v", err)
+		logError("Failed to open %s for writing: %v", selfSignedKey, err)
+		os.Exit(1)
 	}
 	defer keyOut.Close()
 	privateKeyBytes, err := x509.MarshalECPrivateKey(privateKey)
 	if err != nil {
-		log.Fatalf("Failed to marshal private key: %v", err)
+		logError("Failed to marshal EC private key: %v", err)
+		os.Exit(1)
 	}
-	pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privateKeyBytes})
-
-	fmt.Printf("%sSelf-signed certificate generated and saved.%s\n", ColorGreen, ColorReset)
+	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privateKeyBytes}); err != nil {
+		logError("Failed to write key PEM data: %v", err)
+		os.Exit(1)
+	}
+	logSuccess("Self-signed certificate and key generated and saved.")
 }
 
-// getPort prompts the user for a port number, validating its range.
-func getPort(protocol string, suggestedPort uint16) uint16 {
-	reader := bufio.NewReader(os.Stdin)
-	defaultHint := "random"
-	if suggestedPort > 0 {
-		defaultHint = fmt.Sprintf("%d or random", suggestedPort)
-	}
-	for {
-		fmt.Printf("%s %s port (default:%s, 10000-65535): ", ColorYellow, protocol, defaultHint)
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
+func generateRandomPort() uint16 {
+	logInfo("Attempting to generate a random available port...")
+	const minPort = 10000
+	const maxPort = 65535
+	const maxAttempts = 50
 
-		if input == "" {
-			if suggestedPort > 0 {
-				fmt.Printf("Using previous/default: %d\n", suggestedPort)
-				return suggestedPort
-			}
-			return generateRandomPort(uint16(20000 + time.Now().Nanosecond()%10000)) // Fallback if no suggested port
-		}
-
-		port, err := strconv.Atoi(input)
-		if err == nil && port >= 10000 && port <= 65535 {
-			return uint16(port)
-		}
-		fmt.Printf("%sInvalid port. Please enter a number between 10000 and 65535.%s\n", ColorRed, ColorReset)
-	}
-}
-
-// generateRandomPort finds an available random port.
-func generateRandomPort(fallback uint16) uint16 {
-	for i := 0; i < 20; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(55536)) // 65535 - 10000 = 55535
+	for i := 0; i < maxAttempts; i++ {
+		nBig, err := rand.Int(rand.Reader, big.NewInt(int64(maxPort-minPort+1)))
 		if err != nil {
+			logWarn("crypto/rand.Int failed: %v. Retrying... (%d/%d)", err, i+1, maxAttempts)
 			continue
 		}
-		p := uint16(n.Int64() + 10000) // Port between 10000 and 65535
+		p := uint16(nBig.Int64() + int64(minPort))
 
-		// Check if TCP port is available
-		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-		if err == nil {
-			listener.Close()
-			// Check if UDP port is available (less critical, but good practice)
-			packetListener, err := net.ListenPacket("udp", fmt.Sprintf(":%d", p))
-			if err == nil {
-				packetListener.Close()
-				fmt.Printf("%sGenerated random port: %d%s\n", ColorGreen, p, ColorReset)
+		tcpAddr := fmt.Sprintf(":%d", p)
+		listener, tcpErr := net.Listen("tcp", tcpAddr)
+		if tcpErr == nil {
+			_ = listener.Close()
+			udpAddr := fmt.Sprintf(":%d", p)
+			packetListener, udpErr := net.ListenPacket("udp", udpAddr)
+			if udpErr == nil {
+				_ = packetListener.Close()
+				logSuccess("Generated random available port: %d", p)
 				return p
 			}
 		}
 	}
-	fmt.Printf("%sWARN: Failed to generate a random available port after multiple attempts, using fallback %d%s\n", ColorYellow, fallback, ColorReset)
-	return fallback
+	logWarn("Failed to generate a random available port after %d attempts. Please provide one manually.", maxAttempts)
+	return 0
 }
 
-// generateSingBoxUUID generates a new UUID for Sing-box user.
+func getPort(protocol string, suggestedPort uint16) uint16 {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		defaultHint := "random"
+		if suggestedPort > 0 {
+			defaultHint = fmt.Sprintf("%d (previous) or 'random'", suggestedPort)
+		}
+		fmt.Printf("%sEnter %s port (default: %s, range 10000-65535): %s", ColorYellow, protocol, defaultHint, ColorReset)
+		inputRaw, _ := reader.ReadString('\n')
+		input := strings.TrimSpace(strings.ToLower(inputRaw))
+
+		if input == "" {
+			if suggestedPort > 0 {
+				logSuccess("Using previous port for %s: %d", protocol, suggestedPort)
+				return suggestedPort
+			}
+			input = "random"
+		}
+
+		if input == "random" {
+            randomPort := generateRandomPort()
+            if randomPort != 0 {
+                return randomPort
+            }
+			logError("Failed to find a random available port automatically. Please enter a port number manually.")
+			continue
+		}
+
+		portNum, err := strconv.Atoi(input)
+		if err == nil && portNum >= 10000 && portNum <= 65535 {
+			return uint16(portNum)
+		}
+		logError("Invalid port. Please enter a number between 10000 and 65535, 'random', or leave empty for default.")
+	}
+}
+
 func generateSingBoxUUID() string {
 	return uuid.NewString()
 }
 
-// generateRealityKeyPair generates Reality private key, public key, and short ID using Sing-box.
 func generateRealityKeyPair() (privateKey, publicKey, shortID string, err error) {
-	if _, err := os.Stat(singBoxBinary); os.IsNotExist(err) {
-		return "", "", "", fmt.Errorf("sing-box binary not found at %s", singBoxBinary)
+	if _, statErr := os.Stat(singBoxBinary); os.IsNotExist(statErr) {
+		return "", "", "", fmt.Errorf("sing-box binary not found at %s, cannot generate Reality keys", singBoxBinary)
 	}
 
+	logInfo("Generating Sing-box Reality key pair...")
 	output, err := runCommand(singBoxBinary, "generate", "reality-keypair")
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to generate reality keypair: %w", err)
+		return "", "", "", fmt.Errorf("failed to generate reality keypair using sing-box: %w", err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -734,79 +923,78 @@ func generateRealityKeyPair() (privateKey, publicKey, shortID string, err error)
 			}
 		}
 	}
-	if scanner.Err() != nil {
-		return "", "", "", fmt.Errorf("failed to scan reality keypair output: %w", scanner.Err())
+	if scanErr := scanner.Err(); scanErr != nil {
+		return "", "", "", fmt.Errorf("error scanning reality keypair output: %w", scanErr)
 	}
 	if privateKey == "" || publicKey == "" {
 		return "", "", "", fmt.Errorf("failed to parse private/public keys from sing-box output: %s", output)
 	}
 
+	logInfo("Generating Reality Short ID (4 hex chars)...")
 	shortIDOutput, err := runCommand(singBoxBinary, "generate", "rand", "--hex", "4")
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to generate short ID: %w", err)
+		return "", "", "", fmt.Errorf("failed to generate reality short ID using sing-box: %w", err)
 	}
 	shortID = strings.TrimSpace(shortIDOutput)
 
+	logSuccess("Reality key pair and Short ID generated successfully.")
 	return privateKey, publicKey, shortID, nil
 }
 
-// saveInstallData saves the current installation data to a JSON file.
 func saveInstallData() {
+	logInfo("Saving installation data...")
 	data, err := json.MarshalIndent(currentInstallData, "", "  ")
 	if err != nil {
-		fmt.Printf("%sWARN: Failed to marshal install_data.json: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Failed to marshal install_data to JSON: %v", err)
 		return
 	}
+	if err := os.MkdirAll(filepath.Dir(installConfigFile), 0755); err != nil {
+		logWarn("Failed to ensure directory for %s: %v", installConfigFile, err)
+	}
 	if err := os.WriteFile(installConfigFile, data, 0600); err != nil {
-		fmt.Printf("%sWARN: Failed to save install_data.json: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Failed to save %s: %v", installConfigFile, err)
+	} else {
+		logSuccess("Installation data saved to %s", installConfigFile)
 	}
 }
 
-// loadInstallData loads installation data from a JSON file, or initializes defaults.
 func loadInstallData() {
+	logInfo("Loading existing installation data (if any)...")
 	if err := os.MkdirAll(singBoxDir, 0755); err != nil && !os.IsExist(err) {
-		fmt.Printf("%sWARN: Failed to create directory %s: %v%s\n", ColorYellow, singBoxDir, err, ColorReset)
+		logWarn("Failed to create base directory %s: %v. This might cause issues.", singBoxDir, err)
 	}
 
 	data, err := os.ReadFile(installConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("%sNo existing install config found. Initializing with defaults.%s\n", ColorYellow, ColorReset)
+			logInfo("No existing installation config found (%s). Initializing with defaults.", installConfigFile)
 		} else {
-			fmt.Printf("%sWARN: Failed to read %s: %v. Initializing with defaults.%s\n", ColorYellow, installConfigFile, err, ColorReset)
+			logWarn("Failed to read %s: %v. Initializing with defaults.", installConfigFile, err)
 		}
-		currentInstallData.Ports = make(map[string]uint16)
-		currentInstallData.ServerIP = getPublicIP()
-		currentInstallData.Hostname, _ = os.Hostname()
-		if currentInstallData.Hostname == "" {
-			currentInstallData.Hostname = "sb-server"
+		currentInstallData = InstallData{
+			Ports:    make(map[string]uint16),
+			ServerIP: getPublicIP(),
+			Hostname: func() string {
+				name, _ := os.Hostname()
+				if name == "" { name = "sb-server" }
+				return name
+			}(),
+			UseAcmeCert:    false,
+			UseSocks5Auth:  false,
 		}
-		currentInstallData.UseAcmeCert = false
-		currentInstallData.Domain = ""
-		currentInstallData.AcmeEmail = ""
 		return
 	}
 
 	if err := json.Unmarshal(data, &currentInstallData); err != nil {
-		fmt.Printf("%sWARN: Failed to unmarshal %s: %v. Content: <%s>. Initializing with defaults.%s\n", ColorYellow, installConfigFile, err, string(data), ColorReset)
-		currentInstallData.Ports = make(map[string]uint16)
-		currentInstallData.ServerIP = getPublicIP()
-		currentInstallData.Hostname, _ = os.Hostname()
-		if currentInstallData.Hostname == "" {
-			currentInstallData.Hostname = "sb-server"
+		logWarn("Failed to unmarshal %s: %v. Content: <%s>. Initializing with defaults.", installConfigFile, err, string(data))
+		currentInstallData = InstallData{
+			Ports:    make(map[string]uint16),
+			ServerIP: getPublicIP(),
+			Hostname: func() string { name, _ := os.Hostname(); if name == "" { name = "sb-server" }; return name }(),
 		}
-		currentInstallData.MainUUID = ""
-		currentInstallData.RealityPrivateKey = ""
-		currentInstallData.RealityPublicKey = ""
-		currentInstallData.RealityShortID = ""
-		currentInstallData.VmessPath = ""
-		currentInstallData.UseAcmeCert = false
-		currentInstallData.Domain = ""
-		currentInstallData.AcmeEmail = ""
 		return
 	}
 
-	// Ensure maps and string fields are initialized if loaded from an older/partial config
 	if currentInstallData.Ports == nil {
 		currentInstallData.Ports = make(map[string]uint16)
 	}
@@ -819,142 +1007,179 @@ func loadInstallData() {
 			currentInstallData.Hostname = "sb-server"
 		}
 	}
-	if currentInstallData.AcmeEmail == "" && currentInstallData.UseAcmeCert {
-		// If ACME was enabled but email was missing (e.g. from older version), clear domain to avoid broken state
-		currentInstallData.Domain = ""
+	if currentInstallData.UseAcmeCert && currentInstallData.AcmeEmail == "" {
+		logWarn("ACME certificate usage enabled but ACME email is missing in config. Disabling ACME. Reconfigure if needed.")
 		currentInstallData.UseAcmeCert = false
-		fmt.Printf("%sWARN: ACME certs enabled but email missing in config. Reverting to self-signed. Please reconfigure ACME if desired.%s\n", ColorYellow, ColorReset)
+		currentInstallData.Domain = ""
 	}
-
-	fmt.Printf("%sInstall data loaded from %s%s\n", ColorGreen, installConfigFile, ColorReset)
+	if currentInstallData.UseSocks5Auth {
+		if currentInstallData.Socks5Username == "" {
+			currentInstallData.Socks5Username = "sb_socks_user"
+		}
+		if currentInstallData.Socks5Password == "" {
+			currentInstallData.Socks5Password = generateSingBoxUUID()
+			logInfo("Generated new random password for SOCKS5 user %s due to missing one in config.", currentInstallData.Socks5Username)
+		}
+	}
+	logSuccess("Installation data loaded successfully from %s.", installConfigFile)
 }
 
-// buildSingBoxServerConfig constructs the Sing-box server configuration based on currentInstallData.
 func buildSingBoxServerConfig() SingBoxServerConfig {
 	cfg := currentInstallData
 	certPath, keyPath := selfSignedCert, selfSignedKey
-	vmSNI, h2SNI, tSNI := defaultSNI, defaultSNI, defaultSNI
-	isAcmeEffective := false
+
+	vmessServerSNI, hysteria2ServerSNI, tuicServerSNI := defaultSNI, defaultSNI, defaultSNI
+
+	if !isSingBoxVersionAtLeast(1, 7, 0) {
+		logWarn("Sing-box version appears older than 1.7.0 (or version check failed). Some UDP/network features might be handled by defaults or client-side settings.")
+	}
+
 
 	if cfg.UseAcmeCert && cfg.Domain != "" {
 		domainAcmeDir := filepath.Join(acmeBaseDir, cfg.Domain)
 		acmeCertPath := filepath.Join(domainAcmeDir, "fullchain.pem")
 		acmeKeyPath := filepath.Join(domainAcmeDir, "privkey.pem")
 
-		// Check if ACME certificate files actually exist
+		var acmeFilesExist bool
 		if _, certErr := os.Stat(acmeCertPath); certErr == nil {
 			if _, keyErr := os.Stat(acmeKeyPath); keyErr == nil {
-				isAcmeEffective = true
+				acmeFilesExist = true
 			}
 		}
 
-		if isAcmeEffective {
+		if acmeFilesExist {
 			certPath = acmeCertPath
 			keyPath = acmeKeyPath
-			vmSNI, h2SNI, tSNI = cfg.Domain, cfg.Domain, cfg.Domain
-			fmt.Printf("%sServer config: Using ACME certificate for domain: %s (files found).%s\n", ColorGreen, cfg.Domain, ColorReset)
+			vmessServerSNI, hysteria2ServerSNI, tuicServerSNI = cfg.Domain, cfg.Domain, cfg.Domain
+			logInfo("Server config: Using ACME certificate for domain '%s' (files found).", cfg.Domain)
 		} else {
-			// ACME was intended, but files not found. Fallback to self-signed behavior for config, but warn.
-			fmt.Printf("%sCRITICAL WARN: Server config set to use ACME for '%s', but certificate files NOT FOUND at expected paths.%s\n", ColorRed, cfg.Domain, ColorReset)
-			fmt.Printf("%s  Expected cert: %s\n", ColorRed, acmeCertPath, ColorReset)
-			fmt.Printf("%s  Expected key:  %s\n", ColorRed, acmeKeyPath, ColorReset)
-			fmt.Printf("%s  Sing-box will LIKELY FAIL TO START or serve TLS correctly until these files are placed! Default SNI will be used.%s\n", ColorRed, ColorReset)
+			logError("CRITICAL WARNING: Server config is set to use ACME for '%s', but certificate files were NOT FOUND.", cfg.Domain)
+			logError("  Expected cert: %s", acmeCertPath)
+			logError("  Expected key:  %s", acmeKeyPath)
+			logError("  Sing-box will LIKELY FAIL TO START or serve TLS correctly. It will fall back to self-signed certs with default SNI (%s) for now.", defaultSNI)
 			certPath = selfSignedCert
 			keyPath = selfSignedKey
 		}
 	} else {
-		// Ensure self-signed certs exist if ACME is not used or failed
 		_, selfCertStatErr := os.Stat(selfSignedCert)
 		_, selfKeyStatErr := os.Stat(selfSignedKey)
 		if os.IsNotExist(selfCertStatErr) || os.IsNotExist(selfKeyStatErr) {
-			fmt.Printf("%sSelf-signed cert/key not found (default mode), generating now...%s\n", ColorYellow, ColorReset)
+			logInfo("Self-signed cert/key not found. Generating now...")
 			generateSelfSignedCert()
 		}
-		fmt.Printf("%sServer config: Using self-signed certificate (SNI for non-VLESS: %s)%s\n", ColorGreen, defaultSNI, ColorReset)
+		logInfo("Server config: Using self-signed certificate (SNI for TLS non-VLESS: %s).", defaultSNI)
 	}
 
 	if cfg.VmessPath == "" {
 		cfg.VmessPath = fmt.Sprintf("/%s-vm", cfg.MainUUID)
 	}
 
-	return SingBoxServerConfig{
-		Log: SingBoxLogConfig{Level: "info", Timestamp: true},
-		Inbounds: []SingBoxInbound{
-			{
-				Type:                     "vless",
-				Tag:                      "vless-in",
-				Listen:                   "::",
-				ListenPort:               cfg.Ports["vless"],
-				Sniff:                    false,
-				SniffOverrideDestination: false,
-				Users:                    []SingBoxUser{{UUID: cfg.MainUUID, Flow: "xtls-rprx-vision"}},
-				TLS: &SingBoxTLSConfig{
+	inbounds := []SingBoxInbound{
+		{
+			Type:                     "vless",
+			Tag:                      "vless-in",
+			Listen:                   "::",
+			ListenPort:               cfg.Ports["vless"],
+			Sniff:                    false,
+			SniffOverrideDestination: false,
+			Users:                    []SingBoxUser{{UUID: cfg.MainUUID, Flow: "xtls-rprx-vision"}},
+			TLS: &SingBoxTLSConfig{
+				Enabled:    true,
+				ServerName: realitySNI,
+				Reality: &SingBoxRealityConfig{
 					Enabled:    true,
-					ServerName: realitySNI, // Reality SNI is fixed
-					Reality: &SingBoxRealityConfig{
-						Enabled:   true,
-						Handshake: SingBoxRealityHandshake{Server: realitySNI, ServerPort: 443},
-						PrivateKey: cfg.RealityPrivateKey,
-						ShortID:    []string{cfg.RealityShortID},
-					},
-				},
-			},
-			{
-				Type:                     "vmess",
-				Tag:                      "vmess-in",
-				Listen:                   "::",
-				ListenPort:               cfg.Ports["vmess"],
-				Sniff:                    false,
-				SniffOverrideDestination: false,
-				Users:                    []SingBoxUser{{UUID: cfg.MainUUID, AlterID: 0}},
-				Transport: &SingBoxTransportConfig{
-					Type:                "ws",
-					Path:                cfg.VmessPath,
-					MaxEarlyData:        2048,
-					EarlyDataHeaderName: "Sec-WebSocket-Protocol",
-				},
-				TLS: &SingBoxTLSConfig{
-					Enabled:         true,
-					ServerName:      vmSNI,
-					CertificatePath: certPath,
-					KeyPath:         keyPath,
-				},
-			},
-			{
-				Type:                     "hysteria2",
-				Tag:                      "hy2-in",
-				Listen:                   "::",
-				ListenPort:               cfg.Ports["hysteria2"],
-				Sniff:                    false,
-				SniffOverrideDestination: false,
-				Users:                    []SingBoxUser{{Password: cfg.MainUUID}}, // Hysteria2 uses password
-				IgnoreClientBandwidth:    false,
-				TLS: &SingBoxTLSConfig{
-					Enabled:         true,
-					ALPN:            []string{"h3"},
-					CertificatePath: certPath,
-					KeyPath:         keyPath,
-					ServerName:      h2SNI,
-				},
-			},
-			{
-				Type:                     "tuic",
-				Tag:                      "tuic5-in",
-				Listen:                   "::",
-				ListenPort:               cfg.Ports["tuic"],
-				Sniff:                    false,
-				SniffOverrideDestination: false,
-				Users:                    []SingBoxUser{{UUID: cfg.MainUUID, Password: cfg.MainUUID}},
-				CongestionControl:        "bbr",
-				TLS: &SingBoxTLSConfig{
-					Enabled:         true,
-					ALPN:            []string{"h3"},
-					CertificatePath: certPath,
-					KeyPath:         keyPath,
-					ServerName:      tSNI,
+					Handshake:  SingBoxRealityHandshake{Server: realitySNI, ServerPort: 443},
+					PrivateKey: cfg.RealityPrivateKey,
+					ShortID:    []string{cfg.RealityShortID},
 				},
 			},
 		},
+		{
+			Type:                     "vmess",
+			Tag:                      "vmess-in",
+			Listen:                   "::",
+			ListenPort:               cfg.Ports["vmess"],
+			Sniff:                    false,
+			SniffOverrideDestination: false,
+			Users:                    []SingBoxUser{{UUID: cfg.MainUUID, AlterID: 0}},
+			Transport: &SingBoxTransportConfig{
+				Type:                "ws",
+				Path:                cfg.VmessPath,
+				MaxEarlyData:        2048,
+				EarlyDataHeaderName: "Sec-WebSocket-Protocol",
+			},
+			TLS: &SingBoxTLSConfig{
+				Enabled:         true,
+				ServerName:      vmessServerSNI,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
+		},
+		{
+			Type:                     "hysteria2",
+			Tag:                      "hy2-in",
+			Listen:                   "::",
+			ListenPort:               cfg.Ports["hysteria2"],
+			Sniff:                    false,
+			SniffOverrideDestination: false,
+			Users:                    []SingBoxUser{{Password: cfg.MainUUID}},
+			IgnoreClientBandwidth:    false,
+			TLS: &SingBoxTLSConfig{
+				Enabled:         true,
+				ALPN:            []string{"h3"},
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+				ServerName:      hysteria2ServerSNI,
+			},
+		},
+		{
+			Type:                     "tuic",
+			Tag:                      "tuic5-in",
+			Listen:                   "::",
+			ListenPort:               cfg.Ports["tuic"],
+			Sniff:                    false,
+			SniffOverrideDestination: false,
+			Users:                    []SingBoxUser{{UUID: cfg.MainUUID, Password: cfg.MainUUID}},
+			CongestionControl:        "bbr",
+			TLS: &SingBoxTLSConfig{
+				Enabled:         true,
+				ALPN:            []string{"h3"},
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+				ServerName:      tuicServerSNI,
+			},
+		},
+		{
+			Type:       "shadowsocks",
+			Tag:        "ss-in",
+			Listen:     "::",
+			ListenPort: cfg.Ports["shadowsocks"],
+			Users:      []SingBoxUser{{Password: cfg.MainUUID}},
+			Method:     "aes-128-gcm",
+			Sniff:      false,
+		},
+	}
+
+	var socks5Users []SingBoxUser
+	if cfg.UseSocks5Auth {
+		socks5Users = append(socks5Users, SingBoxUser{
+			Username: cfg.Socks5Username,
+			Password: cfg.Socks5Password,
+		})
+	}
+	socks5Inbound := SingBoxInbound{
+		Type:       "socks",
+		Tag:        "socks5-in",
+		Listen:     "::",
+		ListenPort: cfg.Ports["socks5"],
+		Sniff:      false,
+		Users:      socks5Users,
+	}
+	inbounds = append(inbounds, socks5Inbound)
+
+	return SingBoxServerConfig{
+		Log:       SingBoxLogConfig{Level: "info", Timestamp: true},
+		Inbounds:  inbounds,
 		Outbounds: []SingBoxOutbound{
 			{Type: "direct", Tag: "direct", DomainStrategy: "prefer_ipv4"},
 			{Type: "block", Tag: "block"},
@@ -968,22 +1193,22 @@ func buildSingBoxServerConfig() SingBoxServerConfig {
 	}
 }
 
-// writeSingBoxJSON writes the Sing-box server configuration to sb.json.
 func writeSingBoxJSON(serverConfig SingBoxServerConfig) {
-	fmt.Printf("%sWriting sb.json...%s\n", ColorYellow, ColorReset)
+	logInfo("Writing Sing-box JSON configuration file (%s)...", singBoxConfig)
 	data, err := json.MarshalIndent(serverConfig, "", "  ")
 	if err != nil {
-		log.Fatalf("Failed to marshal Sing-box config to JSON: %v", err)
+		logError("Failed to marshal Sing-box config to JSON: %v", err)
+		os.Exit(1)
 	}
 	if err := os.WriteFile(singBoxConfig, data, 0644); err != nil {
-		log.Fatalf("Failed to write Sing-box config file: %v", err)
+		logError("Failed to write Sing-box config file %s: %v", singBoxConfig, err)
+		os.Exit(1)
 	}
-	fmt.Printf("%sConfig written to %s%s\n", ColorGreen, singBoxConfig, ColorReset)
+	logSuccess("Sing-box configuration written to %s.", singBoxConfig)
 }
 
-// setupSystemdService creates and enables the systemd service for Sing-box.
 func setupSystemdService() {
-	fmt.Printf("%sSetting up systemd service...%s\n", ColorYellow, ColorReset)
+	logInfo("Setting up systemd service for Sing-box (%s)...", systemdServiceFile)
 	serviceContent := `[Unit]
 Description=Sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -992,8 +1217,6 @@ After=network.target nss-lookup.target
 [Service]
 User=root
 WorkingDirectory=/etc/s-box
-# CapabilityBoundingSet and AmbientCapabilities are for advanced network operations
-# such as binding to privileged ports, raw sockets for TPROXY, etc.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 ExecStart=/etc/s-box/sing-box run -c /etc/s-box/sb.json
@@ -1006,169 +1229,215 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 `
 	if err := os.WriteFile(systemdServiceFile, []byte(serviceContent), 0644); err != nil {
-		log.Fatalf("Failed to write systemd service file: %v", err)
+		logError("Failed to write systemd service file %s: %v", systemdServiceFile, err)
+		os.Exit(1)
 	}
 
-	// Reload systemd daemon, enable and restart service
+	logInfo("Reloading systemd daemon, enabling and attempting to restart Sing-box service...")
 	if _, err := runCommand("systemctl", "daemon-reload"); err != nil {
-		fmt.Printf("%sWARN: systemctl daemon-reload failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("systemctl daemon-reload failed: %v (might not be critical)", err)
 	}
 	if _, err := runCommand("systemctl", "enable", "sing-box"); err != nil {
-		fmt.Printf("%sWARN: systemctl enable sing-box failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("systemctl enable sing-box failed: %v", err)
 	}
 	restartSingBoxService()
 }
 
-// restartSingBoxService restarts the Sing-box systemd service.
 func restartSingBoxService() {
-	fmt.Printf("%sRestarting Sing-box service...%s\n", ColorYellow, ColorReset)
+	logInfo("Restarting Sing-box service...")
+	if _, err := runCommand(singBoxBinary, "check", "-c", singBoxConfig); err != nil {
+		logError("Sing-box configuration check failed: %v", err)
+		logError("Service will not be restarted due to invalid configuration. Please fix the config or reinstall.")
+		return
+	}
+	logSuccess("Sing-box configuration check passed.")
+
 	if _, err := runCommand("systemctl", "restart", "sing-box"); err != nil {
-		fmt.Printf("%sWARN: Sing-box service restart failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Sing-box service restart command failed: %v", err)
+		statusOutput, _ := runCommand("systemctl", "status", "sing-box")
+		logWarn("Current service status:\n%s", statusOutput)
 	} else {
-		fmt.Printf("%sSing-box service restarted successfully.%s\n", ColorGreen, ColorReset)
+		logSuccess("Sing-box service restarted successfully.")
 	}
 }
 
-// getPublicIP attempts to retrieve the server's public IPv4 or IPv6 address.
 func getPublicIP() string {
 	client := http.Client{Timeout: 5 * time.Second}
-	ipServices := []string{"https://api.ipify.org", "https://api6.ipify.org", "https://icanhazip.com"}
+	ipServices := []string{
+		"https://api.ipify.org",
+		"https://api64.ipify.org",
+		"https://icanhazip.com",
+		"https://ipinfo.io/ip",
+	}
 
 	for i, serviceURL := range ipServices {
 		resp, err := client.Get(serviceURL)
 		if err == nil {
 			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if readErr == nil {
-				ip := strings.TrimSpace(string(body))
-				if net.ParseIP(ip) != nil {
-					return ip
+				ipStr := strings.TrimSpace(string(body))
+				if net.ParseIP(ipStr) != nil {
+					return ipStr
 				}
+				logWarn("Service %s returned invalid IP: %s", serviceURL, ipStr)
+			} else {
+				logWarn("Failed to read response body from %s: %v", serviceURL, readErr)
 			}
-		}
-		if i == len(ipServices)-1 {
-			fmt.Printf("%sWARN: Failed to get public IP address from all services: %v%s\n", ColorYellow, err, ColorReset)
+		} else {
+			logWarn("Failed to get IP from %s: %v (attempt %d/%d)", serviceURL, err, i+1, len(ipServices))
 		}
 	}
-	return "YOUR_SERVER_IP" // Fallback placeholder
+	logWarn("Failed to get public IP address from all services. Using placeholder.")
+	return "YOUR_SERVER_IP"
 }
 
-// Btoi converts a boolean to an integer (0 for true, 1 for false). Used for 'insecure' flags.
-func Btoi(isSecure bool) int {
-	if isSecure {
-		return 0
-	}
-	return 1
-}
-
-// generateNodeLinks generates client configuration links based on the current setup.
 func generateNodeLinks() []string {
 	if currentInstallData.MainUUID == "" {
-		fmt.Printf("%sNo installation data found. Please install Sing-box first.%s\n", ColorYellow, ColorReset)
+		logWarn("No installation data (UUID) found. Please install/reinstall Sing-box first (Option 1).")
 		return nil
 	}
 
 	cfg := currentInstallData
 	var links []string
-	nodeHost := cfg.Hostname
-	if nodeHost == "" {
-		nodeHost = "sb-server"
+	nodeHostTag := cfg.Hostname
+	if nodeHostTag == "" {
+		nodeHostTag = "sb-server"
 	}
 
-	serverIPForLink := cfg.ServerIP
-	if serverIPForLink == "" || serverIPForLink == "YOUR_SERVER_IP" {
-		serverIPForLink = getPublicIP()
+	serverAddressForLinks := cfg.ServerIP
+	if serverAddressForLinks == "" || serverAddressForLinks == "YOUR_SERVER_IP" {
+		serverAddressForLinks = getPublicIP()
 	}
 
-	isAcmeEffectivelyUsed, linkSNIForNonVLESS, addressForNonVLESSLinks := false, defaultSNI, serverIPForLink
+	clientSNIForTLSLinks := defaultSNI
+	clientAddressForTLSLinks := serverAddressForLinks // This is the address the client will connect to (IP or domain)
+	clientInsecureTLSFlag := 1 
+	clientAllowInsecureBoolForJSON := true 
 
+	acmeCertsEffectivelyUsed := false
 	if cfg.UseAcmeCert && cfg.Domain != "" {
-		addressForNonVLESSLinks = cfg.Domain
-		linkSNIForNonVLESS = cfg.Domain
 		domainAcmeDir := filepath.Join(acmeBaseDir, cfg.Domain)
-		certPath, keyPath := filepath.Join(domainAcmeDir, "fullchain.pem"), filepath.Join(domainAcmeDir, "privkey.pem")
-		if _, certErr := os.Stat(certPath); certErr == nil {
-			if _, keyErr := os.Stat(keyPath); keyErr == nil {
-				isAcmeEffectivelyUsed = true
+		acmeCertPath := filepath.Join(domainAcmeDir, "fullchain.pem")
+		acmeKeyPath := filepath.Join(domainAcmeDir, "privkey.pem")
+		if _, certErr := os.Stat(acmeCertPath); certErr == nil {
+			if _, keyErr := os.Stat(acmeKeyPath); keyErr == nil {
+				acmeCertsEffectivelyUsed = true
 			}
 		}
 	}
 
-	if isAcmeEffectivelyUsed {
-		fmt.Printf("%sLinks using ACME domain: %s (certificates found, insecure=0 for VMess/Hy2/TUIC).%s\n", ColorCyan, cfg.Domain, ColorReset)
-	} else if cfg.UseAcmeCert {
-		fmt.Printf("%sWARN: Links use ACME domain: %s, but certificate files NOT found. insecure=1 will be set for VMess/Hy2/TUIC.%s\n", ColorYellow, cfg.Domain, ColorReset)
+	if acmeCertsEffectivelyUsed {
+		clientSNIForTLSLinks = cfg.Domain
+		clientAddressForTLSLinks = cfg.Domain // When ACME is used, client connects to domain
+		clientInsecureTLSFlag = 0      
+		clientAllowInsecureBoolForJSON = false 
+		logInfo("Generating links: ACME cert for '%s' is active. All TLS services (VMess, Hy2, TUIC) will use domain SNI and secure mode.", cfg.Domain)
 	} else {
-		fmt.Printf("%sLinks using IP/default SNI for non-VLESS (Self-Signed mode, insecure=1 for VMess/Hy2/TUIC).%s\n", ColorCyan, ColorReset)
+		if cfg.UseAcmeCert && cfg.Domain != "" { // ACME intended but files missing
+			logWarn("Generating links: ACME for '%s' intended, but cert files NOT FOUND. Links will use IP/default SNI and insecure mode for TLS.", cfg.Domain)
+		} else { // Self-signed mode
+			logInfo("Generating links: Using Self-Signed certs. Links will use IP/default SNI and insecure mode for TLS.")
+		}
+		// Defaults are already set for this case
 	}
 
-	// Format IP addresses for links (IPv6 needs brackets)
-	formatAddress := func(addr string) string {
+	// Helper to format address for URI (wrap IPv6 in brackets)
+	// This should be used for host part of URI, not for "add" field in VMess JSON if "add" is a domain.
+	formatUriHost := func(addr string) string {
 		ip := net.ParseIP(addr)
-		if ip != nil && ip.To4() == nil && ip.To16() != nil {
+		if ip != nil && ip.To4() == nil && ip.To16() != nil { 
 			return fmt.Sprintf("[%s]", addr)
 		}
 		return addr
 	}
-
-	// VLESS Reality
-	vlessActualConnectionAddress := serverIPForLink
-	vlessDisplayAddress := formatAddress(vlessActualConnectionAddress)
-	vlessLink := fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s-VLESS-Reality",
-		cfg.MainUUID, vlessDisplayAddress, cfg.Ports["vless"], realitySNI, cfg.RealityPublicKey, cfg.RealityShortID, nodeHost)
+	
+	// VLESS Reality: connects to serverAddressForLinks (IP or domain directly, SNI is specific realitySNI)
+	vlessFormattedUriHost := formatUriHost(serverAddressForLinks)
+	vlessLink := fmt.Sprintf("vless://%s@%s:%d?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&pbk=%s&sid=%s&type=tcp#%s-VLESS-Reality",
+		cfg.MainUUID, vlessFormattedUriHost, cfg.Ports["vless"],
+		realitySNI, cfg.RealityPublicKey, cfg.RealityShortID, nodeHostTag)
 	links = append(links, vlessLink)
 
-	// VMess WebSocket TLS
-	displayAddressNonVLESS := formatAddress(addressForNonVLESSLinks)
+	// VMess:
+	// "add" field in JSON is the address client connects to. If it's a domain, it's unformatted.
+	// "host" field is WebSocket host header.
+	// "sni" field is TLS SNI.
+	vmessPathForLink := cfg.VmessPath
+	if !strings.HasPrefix(vmessPathForLink, "/") { vmessPathForLink = "/" + vmessPathForLink }
 	vmessObj := map[string]interface{}{
 		"v":    "2",
-		"ps":   fmt.Sprintf("%s-VMESS-WS-TLS", nodeHost),
-		"add":  addressForNonVLESSLinks,
+		"ps":   fmt.Sprintf("%s-VMESS-WS-TLS", nodeHostTag),
+		"add":  clientAddressForTLSLinks, // This is the connection address (IP or domain)
 		"port": strconv.Itoa(int(cfg.Ports["vmess"])),
 		"id":   cfg.MainUUID,
-		"aid":  "0", // AlterID for VMess
+		"aid":  "0",
 		"net":  "ws",
 		"type": "none",
-		"host": linkSNIForNonVLESS, // SNI for VMess
-		"path": cfg.VmessPath,
+		"host": clientSNIForTLSLinks, // WebSocket host should match SNI
+		"path": vmessPathForLink,
 		"tls":  "tls",
-		"sni":  linkSNIForNonVLESS, // SNI for VMess
+		"sni":  clientSNIForTLSLinks, 
+		"allowInsecure": clientAllowInsecureBoolForJSON, 
 	}
-	vmessB, _ := json.Marshal(vmessObj)
-	links = append(links, "vmess://"+base64.RawURLEncoding.EncodeToString(vmessB))
+	vmessJsonBytes, _ := json.Marshal(vmessObj)
+	links = append(links, "vmess://"+base64.RawURLEncoding.EncodeToString(vmessJsonBytes))
 
-	// Hysteria2
-	insecureFlagValue := Btoi(isAcmeEffectivelyUsed && cfg.UseAcmeCert)
+	// Hysteria2 & TUIC: connect to clientAddressForTLSLinks, SNI is clientSNIForTLSLinks
+	hy2FormattedUriHost := formatUriHost(clientAddressForTLSLinks)
 	hysteria2Link := fmt.Sprintf("hysteria2://%s@%s:%d?sni=%s&insecure=%d&alpn=h3#%s-HY2",
-		cfg.MainUUID, displayAddressNonVLESS, cfg.Ports["hysteria2"], linkSNIForNonVLESS, insecureFlagValue, nodeHost)
+		cfg.MainUUID, hy2FormattedUriHost, cfg.Ports["hysteria2"],
+		clientSNIForTLSLinks, clientInsecureTLSFlag, nodeHostTag)
 	links = append(links, hysteria2Link)
 
-	// TUIC v5
+	tuicFormattedUriHost := formatUriHost(clientAddressForTLSLinks)
 	tuicLink := fmt.Sprintf("tuic://%s:%s@%s:%d?sni=%s&congestion_control=bbr&udp_relay_mode=native&alpn=h3&allow_insecure=%d#%s-TUIC",
-		cfg.MainUUID, cfg.MainUUID, displayAddressNonVLESS, cfg.Ports["tuic"], linkSNIForNonVLESS, insecureFlagValue, nodeHost)
+		cfg.MainUUID, cfg.MainUUID, tuicFormattedUriHost, cfg.Ports["tuic"],
+		clientSNIForTLSLinks, clientInsecureTLSFlag, nodeHostTag)
 	links = append(links, tuicLink)
+
+	// Shadowsocks & SOCKS5: connect to serverAddressForLinks (IP or domain directly)
+	ssFormattedUriHost := formatUriHost(serverAddressForLinks)
+	ssCipherMethod := "aes-128-gcm"
+	ssPassword := cfg.MainUUID
+	ssUserInfo := fmt.Sprintf("%s:%s", ssCipherMethod, ssPassword)
+	ssEncodedUserInfo := base64.RawURLEncoding.EncodeToString([]byte(ssUserInfo))
+	ssLink := fmt.Sprintf("ss://%s@%s:%d#%s-SS-%s",
+		ssEncodedUserInfo, ssFormattedUriHost, cfg.Ports["shadowsocks"],
+		nodeHostTag, strings.ToUpper(ssCipherMethod))
+	links = append(links, ssLink)
+
+	socks5AuthPart := ""
+	if cfg.UseSocks5Auth && cfg.Socks5Username != "" && cfg.Socks5Password != "" {
+		socks5AuthPart = fmt.Sprintf("%s:%s@", cfg.Socks5Username, cfg.Socks5Password)
+	}
+	socks5FormattedUriHost := formatUriHost(serverAddressForLinks)
+	socks5Link := fmt.Sprintf("socks5://%s%s:%d#%s-SOCKS5",
+		socks5AuthPart, socks5FormattedUriHost, cfg.Ports["socks5"], nodeHostTag)
+	links = append(links, socks5Link)
 
 	return links
 }
 
-// displayNodeInformationFromLinks prints the generated node links and QR codes.
+
 func displayNodeInformationFromLinks(links []string) {
-	fmt.Printf("\n%s--- Nodes ---%s\n", ColorCyan, ColorReset)
+	fmt.Printf("\n%s--- Node Information & Links ---%s\n", ColorCyan, ColorReset)
 	if len(links) == 0 {
-		fmt.Printf("%sNo links to display.%s\n", ColorYellow, ColorReset)
+		logWarn("No node links to display. Configuration might be incomplete.")
 		return
 	}
 	for _, link := range links {
 		var nodeType string
-		if strings.HasPrefix(link, "vless://") {
-			nodeType = "VLESS-Reality"
-		} else if strings.HasPrefix(link, "vmess://") {
-			nodeType = "VMess-WS-TLS"
-		} else if strings.HasPrefix(link, "hysteria2://") {
-			nodeType = "Hysteria2"
-		} else if strings.HasPrefix(link, "tuic://") {
-			nodeType = "TUICv5"
+		switch {
+		case strings.HasPrefix(link, "vless://"):   nodeType = "VLESS-Reality"
+		case strings.HasPrefix(link, "vmess://"):   nodeType = "VMess-WS-TLS"
+		case strings.HasPrefix(link, "hysteria2://"): nodeType = "Hysteria2"
+		case strings.HasPrefix(link, "tuic://"):    nodeType = "TUICv5"
+		case strings.HasPrefix(link, "ss://"):      nodeType = "Shadowsocks"
+		case strings.HasPrefix(link, "socks5://"):  nodeType = "Socks5"
+		default:                                  nodeType = "Unknown"
 		}
+
 		fmt.Printf("\n%s[%s]%s\n", ColorPurple, nodeType, ColorReset)
 		fmt.Printf("  %sLink: %s%s%s\n", ColorGreen, ColorYellow, link, ColorReset)
 
@@ -1177,147 +1446,172 @@ func displayNodeInformationFromLinks(links []string) {
 			fmt.Printf("  %sQR Code:%s\n", ColorGreen, ColorReset)
 			fmt.Println(qr.ToSmallString(true))
 		} else {
-			fmt.Printf("  %sWARN: Failed to generate QR code: %v%s\n", ColorYellow, err, ColorReset)
+			logWarn("Failed to generate QR code for %s link: %v", nodeType, err)
 		}
 	}
 }
 
-// runAcmeCertbotSetup automates obtaining and setting up ACME certificates using Certbot.
 func runAcmeCertbotSetup() bool {
-	fmt.Printf("\n%s--- ACME Certificate Automation ---%s\n", ColorCyan, ColorReset)
+	fmt.Printf("\n%s--- ACME Certificate Automation (Certbot) ---%s\n", ColorCyan, ColorReset)
 
-	// 1. Prompt for Domain
-	domain := getUserInput(ColorYellow + "Enter your Fully Qualified Domain Name (e.g., sub.example.com): " + ColorReset)
-	if domain == "" || !strings.Contains(domain, ".") {
-		fmt.Printf("%sInvalid domain name. ACME setup aborted.%s\n", ColorRed, ColorReset)
-		return false
-	}
-	currentInstallData.Domain = domain // Store it even if setup fails, for user convenience
+	domainRegex := regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$`)
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
-	// 2. Prompt for Email
-	email := getUserInput(ColorYellow + "Enter your email address for Certbot (e.g., your@example.com): " + ColorReset)
-	if email == "" || !strings.Contains(email, "@") {
-		fmt.Printf("%sInvalid email address. ACME setup aborted.%s\n", ColorRed, ColorReset)
-		return false
+	var domain string
+	for {
+		domain = getUserInput(ColorYellow + "Enter your Fully Qualified Domain Name (e.g., sub.example.com): " + ColorReset)
+		if domain == "" {
+			if strings.ToLower(getUserInput(ColorYellow+"Domain cannot be empty. Cancel ACME setup? (y/N): "+ColorReset)) == "y" {
+				logWarn("ACME setup cancelled by user (empty domain).")
+				return false
+			}
+			continue
+		}
+		if !domainRegex.MatchString(domain) {
+			logError("Invalid domain name format. Please enter a valid FQDN.")
+			continue
+		}
+		break
 	}
-	currentInstallData.AcmeEmail = email // Store it
+	currentInstallData.Domain = domain
+
+	var email string
+	for {
+		email = getUserInput(ColorYellow + "Enter your email address for Certbot notifications (e.g., your@example.com): " + ColorReset)
+		if email == "" {
+			if strings.ToLower(getUserInput(ColorYellow+"Email cannot be empty. Cancel ACME setup? (y/N): "+ColorReset)) == "y" {
+				logWarn("ACME setup cancelled by user (empty email).")
+				return false
+			}
+			continue
+		}
+		if !emailRegex.MatchString(email) {
+			logError("Invalid email address format. Please enter a valid email.")
+			continue
+		}
+		break
+	}
+	currentInstallData.AcmeEmail = email
 
 	currentIP := getPublicIP()
-	fmt.Printf("%sIMPORTANT: Before proceeding, ensure the following:%s\n", ColorYellow, ColorReset)
+	fmt.Printf("\n%sIMPORTANT: Before proceeding, ensure the following:%s\n", ColorYellow, ColorReset)
 	fmt.Printf("  %s1. DNS A (and/or AAAA) record for '%s%s%s' MUST point to this server's public IP: %s%s%s%s\n", ColorCyan, ColorYellow, domain, ColorCyan, ColorYellow, currentIP, ColorCyan, ColorReset)
-	fmt.Printf("  %s2. Port 80 on this server must be OPEN (firewall & not in use by another service) for Certbot's HTTP-01 challenge.%s\n", ColorCyan, ColorReset)
+	fmt.Printf("  %s2. Port 80 (TCP) on this server must be OPEN (firewall & not used by another service) for Certbot's HTTP-01 challenge.%s\n", ColorCyan, ColorReset)
 
-	dnsCheckConfirm := getUserInput(ColorYellow + "Have you verified the DNS record and ensured port 80 is open in your firewall? (y/N): " + ColorReset)
-	if strings.ToLower(dnsCheckConfirm) != "y" {
-		fmt.Printf("%sDNS/Firewall verification not confirmed. ACME setup aborted.%s\n", ColorRed, ColorReset)
-		return false
+	for {
+		dnsCheckConfirm := getUserInput(ColorYellow + "Have you verified DNS and opened port 80 in your firewall? (y/N): " + ColorReset)
+		if strings.ToLower(dnsCheckConfirm) == "y" {
+			break
+		}
+		if strings.ToLower(getUserInput(ColorYellow+"DNS/Firewall not confirmed. Cancel ACME setup? (y/N): "+ColorReset)) == "y" {
+			logWarn("ACME setup cancelled by user (DNS/firewall not confirmed).")
+			return false
+		}
 	}
 
-	// Check if port 80 is free
-	fmt.Printf("%sChecking if port 80 is currently in use (for Certbot's '--standalone' mode)...%s\n", ColorYellow, ColorReset)
+	logInfo("Checking if port 80 is currently in use (for Certbot's '--standalone' mode)...")
 	listener, err := net.Listen("tcp", ":80")
 	if err != nil {
-		fmt.Printf("%sError: Port 80 is likely in use by another application: %v%s\n", ColorRed, err, ColorReset)
-		fmt.Printf("%sPlease stop the conflicting service (e.g., Nginx, Apache) and retry. You can check with: sudo ss -tulnp | grep ':80'%s\n", ColorRed, ColorReset)
-		fmt.Printf("%sACME setup aborted due to port 80 issue.%s\n", ColorRed, ColorReset)
+		logError("Port 80 is likely in use by another application: %v", err)
+		logError("Please stop the conflicting service (e.g., Nginx, Apache) and retry. Check with: sudo ss -tulnp | grep ':80'")
+		logError("ACME setup aborted due to port 80 conflict.")
 		return false
 	}
-	listener.Close() // Release port 80
-	fmt.Printf("%sPort 80 appears to be free for Certbot's '--standalone' mode.%s\n", ColorGreen, ColorReset)
+	_ = listener.Close()
+	logSuccess("Port 80 appears to be free for Certbot.")
 
-	// Check if certbot is installed
 	if _, err := exec.LookPath("certbot"); err != nil {
-		fmt.Printf("%sERROR: Certbot is not found in your system's PATH. Please install it manually or check installation:%s\n", ColorRed, ColorReset)
-		fmt.Printf("%s  sudo apt install certbot -y OR sudo snap install --classic certbot && sudo ln -s /snap/bin/certbot /usr/bin/certbot%s\n", ColorCyan, ColorReset)
-		fmt.Printf("%sACME setup aborted.%s\n", ColorRed, ColorReset)
+		logError("Certbot command is not found in PATH. Please ensure it's installed and accessible.")
+		logError("  Try: sudo apt install certbot -y OR (if using snap) sudo snap install --classic certbot && sudo ln -s /snap/bin/certbot /usr/bin/certbot")
+		logError("ACME setup aborted.")
 		return false
 	}
 
-	fmt.Printf("\n%sAttempting to obtain certificate for %s%s%s using Certbot...%s\n", ColorYellow, ColorCyan, domain, ColorYellow, ColorReset)
-	certbotArgs := []string{"certonly", "--standalone", "--noninteractive", "--email", email, "--agree-tos", "-d", domain}
+	logInfo("Attempting to obtain certificate for %s using Certbot (standalone)...", domain)
+	certbotArgs := []string{"certonly", "--standalone", "--non-interactive", "--preferred-challenges", "http", "--email", email, "--agree-tos", "-d", domain, "--keep-until-expiring"}
 	certbotOutput, certbotErr := runCommand("certbot", certbotArgs...)
 
 	if certbotErr != nil {
-		fmt.Printf("%sCertbot failed to obtain certificate:%s\n", ColorRed, ColorReset)
-		fmt.Printf("%sError: %v%s\n", ColorRed, certbotErr, ColorReset)
-		fmt.Printf("%sOutput: %s%s\n", ColorRed, certbotOutput, ColorReset)
-		fmt.Printf("%sPlease check your DNS settings, firewall, and ensure port 80 is truly free. ACME setup aborted.%s\n", ColorRed, ColorReset)
+		logError("Certbot failed to obtain certificate for %s: %v", domain, certbotErr)
+		logError("Certbot Output:\n%s", certbotOutput)
+		logError("Common issues: DNS not propagated, port 80 blocked by firewall/ISP, or another service using port 80. ACME setup aborted.")
 		return false
 	}
+	logSuccess("Certbot successfully obtained certificate for %s.", domain)
 
-	fmt.Printf("%sCertbot successfully obtained certificate.%s\n", ColorGreen, ColorReset)
-
-	// Copy/Symlink certificates
 	domainAcmeDir := filepath.Join(acmeBaseDir, domain)
 	destCertPath := filepath.Join(domainAcmeDir, "fullchain.pem")
 	destKeyPath := filepath.Join(domainAcmeDir, "privkey.pem")
 
-	// Ensure destination directory exists
 	if err := os.MkdirAll(domainAcmeDir, 0755); err != nil {
-		fmt.Printf("%sERROR: Could not create ACME destination directory %s: %v%s\n", ColorRed, domainAcmeDir, err, ColorReset)
+		logError("Could not create ACME destination directory %s: %v", domainAcmeDir, err)
 		return false
 	}
 
-	// Paths where Certbot places them
 	sourceCertPath := filepath.Join("/etc/letsencrypt/live", domain, "fullchain.pem")
 	sourceKeyPath := filepath.Join("/etc/letsencrypt/live", domain, "privkey.pem")
 
-	fmt.Printf("%sCopying certificate files to Sing-box directory...%s\n", ColorYellow, ColorReset)
-
-	// Copy fullchain.pem
-	if _, err := runCommand("cp", sourceCertPath, destCertPath); err != nil {
-		fmt.Printf("%sERROR: Failed to copy fullchain.pem: %v%s\n", ColorRed, err, ColorReset)
+	logInfo("Copying certificate files to Sing-box directory: %s", domainAcmeDir)
+	if _, err := runCommand("cp", "-L", sourceCertPath, destCertPath); err != nil {
+		logError("Failed to copy fullchain.pem from %s to %s: %v", sourceCertPath, destCertPath, err)
 		return false
 	}
-	// Copy privkey.pem
-	if _, err := runCommand("cp", sourceKeyPath, destKeyPath); err != nil {
-		fmt.Printf("%sERROR: Failed to copy privkey.pem: %v%s\n", ColorRed, err, ColorReset)
+	if _, err := runCommand("cp", "-L", sourceKeyPath, destKeyPath); err != nil {
+		logError("Failed to copy privkey.pem from %s to %s: %v", sourceKeyPath, destKeyPath, err)
 		return false
 	}
 
-	// Set permissions
 	if _, err := runCommand("chmod", "644", destCertPath); err != nil {
-		fmt.Printf("%sWARN: Failed to set permissions on %s: %v%s\n", ColorYellow, destCertPath, err, ColorReset)
+		logWarn("Failed to set 644 permissions on %s: %v", destCertPath, err)
 	}
 	if _, err := runCommand("chmod", "600", destKeyPath); err != nil {
-		fmt.Printf("%sWARN: Failed to set permissions on %s: %v%s\n", ColorYellow, destKeyPath, err, ColorReset)
+		logWarn("Failed to set 600 permissions on %s: %v", destKeyPath, err)
 	}
 	if _, err := runCommand("chown", "root:root", destCertPath, destKeyPath); err != nil {
-		fmt.Printf("%sWARN: Failed to set ownership on certificate files: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Failed to set root ownership on certificate files in %s: %v", domainAcmeDir, err)
 	}
 
-	// Final check for files
-	_, certErr := os.Stat(destCertPath)
-	_, keyErr := os.Stat(destKeyPath)
-	if os.IsNotExist(certErr) || os.IsNotExist(keyErr) {
-		fmt.Printf("%sERROR: Certificates were not found at the destination after copying:%s\n", ColorRed, ColorReset)
-		if os.IsNotExist(certErr) {
-			fmt.Printf("  Missing: %s%s%s\n", ColorRed, destCertPath, ColorReset)
-		}
-		if os.IsNotExist(keyErr) {
-			fmt.Printf("  Missing: %s%s%s\n", ColorRed, destKeyPath, ColorReset)
-		}
-		fmt.Printf("%sACME certificate setup failed after Certbot run. Sing-box will use self-signed certificates.%s\n", ColorRed, ColorReset)
+	_, certStatErr := os.Stat(destCertPath)
+	_, keyStatErr := os.Stat(destKeyPath)
+	if os.IsNotExist(certStatErr) || os.IsNotExist(keyStatErr) {
+		logError("ACME certificate files were not found at destination after copying attempt.")
+		if os.IsNotExist(certStatErr) { logError("  Missing: %s", destCertPath) }
+		if os.IsNotExist(keyStatErr) { logError("  Missing: %s", destKeyPath) }
+		logError("ACME certificate setup failed. Sing-box may use self-signed certificates as fallback.")
 		return false
 	}
 
-	fmt.Printf("%sACME certificate automation complete for '%s'. Files are in %s%s%s. Sing-box will be configured to use them.%s\n", ColorGreen, ColorCyan, domain, ColorGreen, domainAcmeDir, ColorReset)
+	logSuccess("ACME certificate automation complete for '%s'. Files copied to %s.", domain, domainAcmeDir)
+	logInfo("Sing-box will be configured to use these certificates.")
 	return true
 }
 
-// installInteractive guides the user through the Sing-box installation process.
 func installInteractive() {
-	fmt.Printf("%sStarting Sing-box installation/reinstallation...%s\n", ColorYellow, ColorReset)
+	fmt.Printf("\n%s--- Starting Sing-box Installation / Reinstallation ---%s\n", ColorYellow, ColorReset)
 	checkRoot()
 	checkOS()
 	installDependencies()
 
-	os.MkdirAll(singBoxDir, 0755)
-	os.MkdirAll(acmeBaseDir, 0755)
+	_ = os.MkdirAll(singBoxDir, 0755)
+	_ = os.MkdirAll(acmeBaseDir, 0755)
 
 	downloadAndInstallSingBox()
 
-	fmt.Printf("%sGenerating base self-signed certificates as a fallback...%s\n", ColorYellow, ColorReset)
+	installedVersion, versionErr := getSingBoxVersion()
+	if versionErr != nil {
+		logError("CRITICAL: Failed to confirm Sing-box version after download: %v", versionErr)
+		logError("This could mean the binary was not installed correctly or is corrupted. Aborting installation.")
+		os.Exit(1)
+	}
+	logSuccess("Confirmed Installed Sing-box Binary Version: %s", installedVersion)
+
+	if !isSingBoxVersionAtLeast(1, 7, 0) {
+		logWarn("Sing-box version appears older than 1.7.0 (or version check failed). Some UDP/network features might be handled by defaults or client-side settings.")
+	} else {
+		logInfo("Sing-box version %s is 1.7.0 or newer. Default configuration should be suitable.", installedVersion)
+	}
+
+	logInfo("Generating base self-signed certificates (as a fallback or default)...")
 	generateSelfSignedCert()
 
 	loadInstallData()
@@ -1326,38 +1620,71 @@ func installInteractive() {
 	if currentInstallData.Ports == nil {
 		currentInstallData.Ports = make(map[string]uint16)
 	}
-	currentInstallData.Ports["vless"] = getPort("VLESS", currentInstallData.Ports["vless"])
-	currentInstallData.Ports["vmess"] = getPort("VMess", currentInstallData.Ports["vmess"])
-	currentInstallData.Ports["hysteria2"] = getPort("Hysteria2", currentInstallData.Ports["hysteria2"])
-	currentInstallData.Ports["tuic"] = getPort("TUIC", currentInstallData.Ports["tuic"])
+	currentInstallData.Ports["vless"]       = getPort("VLESS", currentInstallData.Ports["vless"])
+	currentInstallData.Ports["vmess"]       = getPort("VMess", currentInstallData.Ports["vmess"])
+	currentInstallData.Ports["hysteria2"]   = getPort("Hysteria2", currentInstallData.Ports["hysteria2"])
+	currentInstallData.Ports["tuic"]        = getPort("TUIC", currentInstallData.Ports["tuic"])
+	currentInstallData.Ports["shadowsocks"] = getPort("Shadowsocks", currentInstallData.Ports["shadowsocks"])
+	currentInstallData.Ports["socks5"]      = getPort("Socks5", currentInstallData.Ports["socks5"])
 
 	currentInstallData.MainUUID = generateSingBoxUUID()
-	fmt.Printf("%sGenerated UUID: %s%s%s\n", ColorGreen, ColorYellow, currentInstallData.MainUUID, ColorReset)
+	logSuccess("Generated Main UUID for services: %s", currentInstallData.MainUUID)
 
 	currentInstallData.VmessPath = fmt.Sprintf("/%s-vm", currentInstallData.MainUUID)
 
-	privKey, pubKey, shortID, err := generateRealityKeyPair()
-	if err != nil {
-		log.Fatalf("Failed to generate Reality key pair: %v", err)
+	privKey, pubKey, shortID, realityErr := generateRealityKeyPair()
+	if realityErr != nil {
+		logError("Failed to generate Reality key pair: %v. Aborting installation.", realityErr)
+		os.Exit(1)
 	}
-	currentInstallData.RealityPrivateKey, currentInstallData.RealityPublicKey, currentInstallData.RealityShortID = privKey, pubKey, shortID
-	fmt.Printf("%sReality Public Key: %s%s%s\n", ColorGreen, ColorYellow, pubKey, ColorReset)
-	fmt.Printf("%sReality Short ID: %s%s%s\n", ColorGreen, ColorYellow, shortID, ColorReset)
+	currentInstallData.RealityPrivateKey = privKey
+	currentInstallData.RealityPublicKey = pubKey
+	currentInstallData.RealityShortID = shortID
+	logSuccess("Reality Public Key: %s", pubKey)
+	logSuccess("Reality Short ID: %s", shortID)
 
-	fmt.Printf("\n%s--- Certificate Configuration ---%s\n", ColorCyan, ColorReset)
-	certChoice := getUserInput(ColorYellow + "Use ACME (domain) certificate for VMess/Hysteria2/TUIC? (y/N): " + ColorReset)
+	fmt.Printf("\n%s--- Socks5 Authentication Configuration ---%s\n", ColorCyan, ColorReset)
+	socks5AuthChoice := getUserInput(ColorYellow + "Enable username/password authentication for Socks5 inbound? (y/N): " + ColorReset)
+	if strings.ToLower(socks5AuthChoice) == "y" {
+		currentInstallData.UseSocks5Auth = true
+		for {
+			username := getUserInput(ColorYellow + "Enter Socks5 username (default: sb_socks_user): " + ColorReset)
+			if username == "" { username = "sb_socks_user" }
+			currentInstallData.Socks5Username = username
+			if currentInstallData.Socks5Username != "" { break }
+			logError("Socks5 username cannot be empty. Please try again.")
+		}
+		for {
+			password := getUserInput(ColorYellow + "Enter Socks5 password (leave empty for random, strong password recommended): " + ColorReset)
+			if password == "" {
+				password = generateSingBoxUUID()
+				logSuccess("Generated random Socks5 password: %s", password)
+			}
+			currentInstallData.Socks5Password = password
+			if currentInstallData.Socks5Password != "" { break }
+			logError("Socks5 password cannot be empty. Please try again.")
+		}
+		logSuccess("Socks5 authentication enabled. User: %s", currentInstallData.Socks5Username)
+	} else {
+		currentInstallData.UseSocks5Auth = false
+		currentInstallData.Socks5Username = ""
+		currentInstallData.Socks5Password = ""
+		logInfo("Socks5 inbound will be unauthenticated (open access).")
+	}
+
+	fmt.Printf("\n%s--- Certificate Configuration (for VMess, Hysteria2, TUIC) ---%s\n", ColorCyan, ColorReset)
+	certChoice := getUserInput(ColorYellow + "Use ACME (Let's Encrypt) certificate for a domain? (y/N, N=Self-Signed): " + ColorReset)
 	if strings.ToLower(certChoice) == "y" {
-		if runAcmeCertbotSetup() { // Call the new automation function
+		if runAcmeCertbotSetup() {
 			currentInstallData.UseAcmeCert = true
-			// Domain and Email are already stored by runAcmeCertbotSetup()
 		} else {
-			fmt.Printf("%sACME setup failed. Reverting to self-signed certificates.%s\n", ColorYellow, ColorReset)
+			logWarn("ACME certificate setup failed or was cancelled. Reverting to self-signed certificates.")
 			currentInstallData.UseAcmeCert = false
-			currentInstallData.Domain = ""    // Clear domain if ACME failed
-			currentInstallData.AcmeEmail = "" // Clear email if ACME failed
+			currentInstallData.Domain = ""
+			currentInstallData.AcmeEmail = ""
 		}
 	} else {
-		fmt.Printf("%sUsing self-signed certificates.%s\n", ColorGreen, ColorReset)
+		logInfo("Using self-signed certificates for TLS-enabled services (VMess, Hysteria2, TUIC).")
 		currentInstallData.UseAcmeCert = false
 		currentInstallData.Domain = ""
 		currentInstallData.AcmeEmail = ""
@@ -1365,9 +1692,7 @@ func installInteractive() {
 
 	currentInstallData.ServerIP = getPublicIP()
 	currentInstallData.Hostname, _ = os.Hostname()
-	if currentInstallData.Hostname == "" {
-		currentInstallData.Hostname = "sb-server"
-	}
+	if currentInstallData.Hostname == "" { currentInstallData.Hostname = "sb-server" }
 
 	saveInstallData()
 
@@ -1375,10 +1700,9 @@ func installInteractive() {
 	writeSingBoxJSON(serverConfig)
 	setupSystemdService()
 
-	time.Sleep(1 * time.Second) // Give service a moment to start
+	time.Sleep(1 * time.Second)
 	statusText, isRunning := getSingBoxStatus()
 
-	// Specific warning if ACME was chosen but service failed, likely due to missing certs
 	if !isRunning && currentInstallData.UseAcmeCert && currentInstallData.Domain != "" {
 		domainAcmeDir := filepath.Join(acmeBaseDir, currentInstallData.Domain)
 		certPath := filepath.Join(domainAcmeDir, "fullchain.pem")
@@ -1386,275 +1710,423 @@ func installInteractive() {
 		_, certErr := os.Stat(certPath)
 		_, keyErr := os.Stat(keyPath)
 		if os.IsNotExist(certErr) || os.IsNotExist(keyErr) {
-			fmt.Printf("\n%sIMPORTANT WARNING:%s\n%sSing-box service is %s%s%s. This is highly likely because ACME certificates for '%s%s%s' are missing at:\n  Cert: %s\n  Key:  %s\nPlease ensure these files are in place, or switch to self-signed via option '4' in the main menu, then restart Sing-box.%s\n", ColorRed, ColorReset, ColorRed, statusText, ColorReset, ColorYellow, ColorCyan, currentInstallData.Domain, ColorYellow, certPath, keyPath, ColorReset)
+			logError("\nIMPORTANT WARNING:")
+			logError("Sing-box service is %s. This is LIKELY because ACME certificates for '%s' are MISSING at:", statusText, currentInstallData.Domain)
+			logError("  Cert: %s (exists: %v)", certPath, !os.IsNotExist(certErr))
+			logError("  Key:  %s (exists: %v)", keyPath, !os.IsNotExist(keyErr))
+			logError("Please ensure these files exist, or switch to Self-Signed (Option 4) and restart Sing-box.")
 		}
 	} else if !isRunning {
-		fmt.Printf("\n%sWARN: Sing-box service is %s%s%s. Check logs using option '9' for details.%s\n", ColorRed, statusText, ColorReset, ColorYellow, ColorReset)
+		logWarn("Sing-box service is %s. Check logs (Option 10) for details if issues persist.", statusText)
 	}
 
 	displayNodeInformationFromLinks(generateNodeLinks())
 	cleanupInstallationFiles()
 
-	fmt.Printf("\n%sInstallation completed successfully.%s\n", ColorGreen, ColorReset)
+	logSuccess("Sing-box installation/reinstallation process completed.")
 }
 
-// uninstall removes all Sing-box related files and services.
 func uninstall() {
 	checkRoot()
-	fmt.Printf("%sUninstalling Sing-box...%s\n", ColorYellow, ColorReset)
+	logInfo("Uninstalling Sing-box and related configurations...")
 
-	// Remove CLI symlink if it exists
 	symlinkPath := filepath.Join("/usr/local/bin", cliCommandName)
 	if err := os.Remove(symlinkPath); err == nil {
-		fmt.Printf("%sRemoved command symlink: %s%s\n", ColorGreen, symlinkPath, ColorReset)
+		logSuccess("Removed command symlink: %s", symlinkPath)
 	} else if !os.IsNotExist(err) {
-		fmt.Printf("%sWARN: Could not remove symlink %s: %v%s\n", ColorYellow, symlinkPath, err, ColorReset)
+		logWarn("Could not remove symlink %s: %v (might be already removed or never created)", symlinkPath, err)
 	}
 
-	// Stop and disable systemd service
-	runCommand("systemctl", "stop", "sing-box")
-	runCommand("systemctl", "disable", "sing-box")
-	os.Remove(systemdServiceFile)
+	logInfo("Stopping and disabling Sing-box systemd service...")
+	_, _ = runCommand("systemctl", "stop", "sing-box")
+	_, _ = runCommand("systemctl", "disable", "sing-box")
 
-	// Remove Sing-box configuration directory
+	if err := os.Remove(systemdServiceFile); err == nil {
+		logSuccess("Removed systemd service file: %s", systemdServiceFile)
+	} else if !os.IsNotExist(err) {
+		logWarn("Could not remove systemd service file %s: %v", systemdServiceFile, err)
+	}
+
+	logInfo("Removing Sing-box configuration directory: %s...", singBoxDir)
 	if err := os.RemoveAll(singBoxDir); err != nil {
-		fmt.Printf("%sWARN: Failed to remove Sing-box directory %s: %v%s\n", ColorYellow, singBoxDir, err, ColorReset)
+		logWarn("Failed to remove Sing-box directory %s: %v", singBoxDir, err)
+	} else {
+		logSuccess("Removed Sing-box directory %s.", singBoxDir)
 	}
 
-	runCommand("systemctl", "daemon-reload") // Reload systemd to reflect changes
+	logInfo("Reloading systemd daemon...")
+	_, _ = runCommand("systemctl", "daemon-reload")
 
-	fmt.Printf("%sSing-box uninstallation complete.%s\n", ColorGreen, ColorReset)
+	logSuccess("Sing-box uninstallation complete.")
+	logInfo("If you also want to remove Go, you'll need to do that manually (e.g., 'sudo rm -rf /usr/local/go /etc/profile.d/go_env.sh').")
 }
 
-// manageNodes displays the current Sing-box node information (links and QR codes).
 func manageNodes() {
 	if _, err := os.Stat(installConfigFile); os.IsNotExist(err) {
-		fmt.Printf("%sSing-box is not installed or configuration data is missing. Please install first.%s\n", ColorYellow, ColorReset)
+		logWarn("Sing-box is not installed or configuration data (%s) is missing. Please install first (Option 1).", installConfigFile)
 		return
 	}
 	displayNodeInformationFromLinks(generateNodeLinks())
 }
 
-// manageCertificates allows switching between ACME and self-signed certificates.
 func manageCertificates() {
 	checkRoot()
 	if _, err := os.Stat(installConfigFile); os.IsNotExist(err) {
-		fmt.Printf("%sSing-box is not installed or configuration data is missing.%s\n", ColorYellow, ColorReset)
+		logWarn("Sing-box is not installed or config data is missing. Please install first.")
 		return
 	}
 
-	// Make sure currentInstallData is loaded before displaying current setting
 	loadInstallData()
 
-	fmt.Printf("\n%s--- Manage Certificates ---%s\n", ColorCyan, ColorReset)
-	fmt.Printf("Current setting: Use ACME Certificate = %s%v%s", ColorYellow, currentInstallData.UseAcmeCert, ColorReset)
+	fmt.Printf("\n%s--- Manage Certificates (for VMess, Hysteria2, TUIC) ---%s\n", ColorCyan, ColorReset)
+	fmt.Printf("Current setting: Use ACME (Let's Encrypt) Certificate = %s%v%s", ColorYellow, currentInstallData.UseAcmeCert, ColorReset)
 	if currentInstallData.UseAcmeCert {
 		fmt.Printf(" (Domain: %s%s%s, Email: %s%s%s)\n", ColorYellow, currentInstallData.Domain, ColorReset, ColorYellow, currentInstallData.AcmeEmail, ColorReset)
 	} else {
-		fmt.Printf(" %s(Using Self-Signed)%s\n", ColorYellow, ColorReset)
+		fmt.Printf(" %s(Using Self-Signed Certificates)%s\n", ColorYellow, ColorReset)
 	}
-
+	fmt.Println(strings.Repeat("-", 60))
 	fmt.Printf("%s1. Switch to/Reconfigure ACME (Domain) Certificate%s\n", ColorGreen, ColorReset)
 	fmt.Printf("%s2. Switch to Self-Signed Certificate%s\n", ColorGreen, ColorReset)
 	fmt.Printf("%s0. Back to Main Menu%s\n", ColorYellow, ColorReset)
 
-	choice := getUserInput(ColorYellow + "Choice: " + ColorReset)
-	switchedConfig := false
+	choice := getUserInput(ColorYellow + "Your choice: " + ColorReset)
+	configChanged := false
 
 	switch choice {
 	case "1":
 		originalDomain, originalUseAcme, originalEmail := currentInstallData.Domain, currentInstallData.UseAcmeCert, currentInstallData.AcmeEmail
 		if currentInstallData.UseAcmeCert {
-			fmt.Printf("%sCurrently configured to use ACME for domain: %s%s%s\n", ColorYellow, ColorBlue, currentInstallData.Domain, ColorReset)
-			if strings.ToLower(getUserInput(ColorYellow + "Reconfigure for this domain or a new one? (y/N): " + ColorReset)) != "y" {
-				fmt.Printf("%sNo changes made to ACME configuration.%s\n", ColorYellow, ColorReset)
+			logInfo("Currently configured to use ACME for domain: %s", currentInstallData.Domain)
+			if strings.ToLower(getUserInput(ColorYellow+"Reconfigure/renew for this domain or set up a new one? (y/N): "+ColorReset)) != "y" {
+				logInfo("No changes made to ACME configuration.")
 				return
 			}
 		}
-
-		if runAcmeCertbotSetup() { // Call the new automation function
+		if runAcmeCertbotSetup() {
 			currentInstallData.UseAcmeCert = true
-			switchedConfig = true
-			fmt.Printf("%sSing-box is now configured to use ACME for domain: %s%s%s\n", ColorGreen, ColorBlue, currentInstallData.Domain, ColorReset)
+			configChanged = true
+			logSuccess("Sing-box is now configured to use ACME for domain: %s", currentInstallData.Domain)
 		} else {
-			fmt.Printf("%sACME setup failed. Reverting to previous certificate settings.%s\n", ColorRed, ColorReset)
+			logWarn("ACME setup failed or was cancelled. Reverting to previous certificate settings.")
+			currentInstallData.Domain = originalDomain
+			currentInstallData.AcmeEmail = originalEmail
+			currentInstallData.UseAcmeCert = originalUseAcme
 			if originalUseAcme {
-				currentInstallData.Domain = originalDomain
-				currentInstallData.AcmeEmail = originalEmail
-				currentInstallData.UseAcmeCert = true
-				fmt.Printf("%sReverted to previous ACME settings for domain: %s%s%s\n", ColorYellow, originalDomain, ColorReset)
+				logWarn("Reverted to previous ACME settings for domain: %s (if any).", originalDomain)
 			} else {
-				currentInstallData.UseAcmeCert = false
-				currentInstallData.Domain = ""
-				currentInstallData.AcmeEmail = ""
-				fmt.Printf("%sReverted to Self-Signed settings.%s\n", ColorYellow, ColorReset)
+				logWarn("Reverted to Self-Signed certificate settings.")
 			}
-			// No config change if ACME setup failed, so switchedConfig remains false
 		}
 	case "2":
-		if !currentInstallData.UseAcmeCert && currentInstallData.Domain == "" {
-			fmt.Printf("%sAlready using self-signed certificate. No change made.%s\n", ColorYellow, ColorReset)
+		if !currentInstallData.UseAcmeCert {
+			logInfo("Already using self-signed certificates. No change made.")
 			return
 		}
-		fmt.Printf("%sSwitching to self-signed certificate...%s\n", ColorYellow, ColorReset)
+		logInfo("Switching to self-signed certificates...")
 		generateSelfSignedCert()
 		currentInstallData.UseAcmeCert = false
 		currentInstallData.Domain = ""
 		currentInstallData.AcmeEmail = ""
-		switchedConfig = true
-		fmt.Printf("%sSuccessfully switched to self-signed certificate.%s\n", ColorGreen, ColorReset)
+		configChanged = true
+		logSuccess("Successfully switched to self-signed certificates.")
 	case "0":
 		return
 	default:
-		fmt.Printf("%sInvalid choice. Please try again.%s\n", ColorRed, ColorReset)
+		logError("Invalid choice. Please try again.")
 		return
 	}
 
-	if switchedConfig {
+	if configChanged {
 		saveInstallData()
-		fmt.Printf("%sRebuilding Sing-box server configuration...%s\n", ColorYellow, ColorReset)
-		serverConfig := buildSingBoxServerConfig()
-		writeSingBoxJSON(serverConfig)
+		logInfo("Rebuilding Sing-box server configuration due to certificate change...")
+		serverCfg := buildSingBoxServerConfig()
+		writeSingBoxJSON(serverCfg)
 		restartSingBoxService()
-		fmt.Printf("%sSing-box configuration has been updated and service restarted.%s\n", ColorGreen, ColorReset)
-		manageNodes() // Show updated node info
+		logSuccess("Sing-box configuration updated and service restarted.")
+		displayNodeInformationFromLinks(generateNodeLinks())
 	}
 }
 
-// generateAndShowSubscription generates and displays the Base64 encoded subscription link.
+func manageSocks5Auth() {
+	checkRoot()
+	if _, err := os.Stat(installConfigFile); os.IsNotExist(err) {
+		logWarn("Sing-box is not installed or configuration data is missing. Please install first.")
+		return
+	}
+	loadInstallData()
+
+	fmt.Printf("\n%s--- Manage Socks5 Authentication ---%s\n", ColorCyan, ColorReset)
+	currentStatus := "Disabled (Open Access)"
+	if currentInstallData.UseSocks5Auth {
+		currentStatus = fmt.Sprintf("Enabled (User: %s%s%s, Pass: [hidden])", ColorYellow, currentInstallData.Socks5Username, ColorReset)
+	}
+	fmt.Printf("Current Socks5 authentication status: %s%s%s\n", ColorYellow, currentStatus, ColorReset)
+	fmt.Println(strings.Repeat("-", 60))
+	fmt.Printf("%s1. Enable/Reconfigure Socks5 Authentication%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s2. Disable Socks5 Authentication%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s0. Back to Main Menu%s\n", ColorYellow, ColorReset)
+
+	choice := getUserInput(ColorYellow + "Your choice: " + ColorReset)
+	configChanged := false
+
+	switch choice {
+	case "1":
+		if currentInstallData.UseSocks5Auth {
+			logInfo("Socks5 authentication is already enabled. Reconfiguring...")
+		} else {
+			logInfo("Enabling Socks5 authentication.")
+		}
+		currentInstallData.UseSocks5Auth = true
+
+		defaultUsernameHint := "sb_socks_user"
+		if currentInstallData.Socks5Username != "" {
+			defaultUsernameHint = currentInstallData.Socks5Username
+		}
+		for {
+			username := getUserInput(ColorYellow + fmt.Sprintf("Enter Socks5 username (default: %s): ", defaultUsernameHint) + ColorReset)
+			if username == "" { username = defaultUsernameHint }
+			if username != "" {
+				currentInstallData.Socks5Username = username
+				break
+			}
+			logError("Socks5 username cannot be empty. Please enter a value or accept default.")
+		}
+
+		for {
+			password := getUserInput(ColorYellow + "Enter Socks5 password (leave empty for random, strong password recommended): " + ColorReset)
+			if password == "" {
+				password = generateSingBoxUUID()
+				logSuccess("Generated random Socks5 password: %s", password)
+			}
+			if password != "" {
+				currentInstallData.Socks5Password = password
+				break
+			}
+			logError("Socks5 password cannot be empty. Please enter a value or let one be generated.")
+		}
+		logSuccess("Socks5 authentication configured. Username: %s", currentInstallData.Socks5Username)
+		configChanged = true
+
+	case "2":
+		if !currentInstallData.UseSocks5Auth {
+			logInfo("Socks5 authentication is already disabled. No change made.")
+			return
+		}
+		logInfo("Disabling Socks5 authentication.")
+		currentInstallData.UseSocks5Auth = false
+		currentInstallData.Socks5Username = ""
+		currentInstallData.Socks5Password = ""
+		logSuccess("Socks5 authentication disabled. Socks5 inbound will now allow open access.")
+		configChanged = true
+
+	case "0":
+		return
+	default:
+		logError("Invalid choice. Please try again.")
+		return
+	}
+
+	if configChanged {
+		saveInstallData()
+		logInfo("Rebuilding Sing-box server configuration due to Socks5 auth change...")
+		serverCfg := buildSingBoxServerConfig()
+		writeSingBoxJSON(serverCfg)
+		restartSingBoxService()
+		logSuccess("Sing-box configuration updated and service restarted.")
+	}
+}
+
+func updateSingBoxBinaryAndRestartInteractive() {
+	logInfo("Attempting to update Sing-box binary to the latest version...")
+	checkRoot()
+
+	oldVersion, errOld := getSingBoxVersion()
+	if errOld != nil {
+		logWarn("Could not determine current Sing-box version before update: %v", errOld)
+		oldVersion = "unknown"
+	}
+
+	downloadAndInstallSingBox()
+
+	newVersion, errNew := getSingBoxVersion()
+	if errNew != nil {
+		logWarn("Failed to get new Sing-box version after update attempt: %v", errNew)
+		newVersion = "unknown"
+	}
+
+	if oldVersion != "unknown" && newVersion != "unknown" && oldVersion == newVersion {
+		logInfo("Sing-box is already at the latest version (%s).", newVersion)
+	} else {
+		logSuccess("Sing-box updated from version '%s' to '%s'.", oldVersion, newVersion)
+	}
+
+	fmt.Printf("\n%sIMPORTANT: The Sing-box binary has been updated.%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s  - A service restart is needed for the new binary to take effect.%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s  - If the new version includes features requiring config changes, you might need to re-run '1. Install/Reinstall Sing-box' to regenerate the config.%s\n", ColorYellow, ColorReset)
+
+	confirmRestart := getUserInput(ColorYellow + "Restart Sing-box service now to apply the updated binary? (y/N): " + ColorReset)
+	if strings.ToLower(confirmRestart) == "y" {
+		restartSingBoxService()
+	} else {
+		logWarn("Sing-box service not restarted. Please restart it manually (Option 7) for the update to take effect.")
+	}
+}
+
 func generateAndShowSubscription() {
 	if _, err := os.Stat(installConfigFile); os.IsNotExist(err) {
-		fmt.Printf("%sSing-box is not installed or configuration data is missing. Please install first.%s\n", ColorYellow, ColorReset)
+		logWarn("Sing-box is not installed or configuration data is missing. Please install first (Option 1).")
 		return
 	}
-
 	links := generateNodeLinks()
 	if len(links) == 0 {
-		fmt.Printf("%sNo nodes configured to generate a subscription link.%s\n", ColorYellow, ColorReset)
+		logWarn("No nodes configured to generate a subscription link.")
 		return
 	}
 
-	var subscriptionBuilder strings.Builder
-	for _, link := range links {
-		subscriptionBuilder.WriteString(link + "\n")
+	var sbS strings.Builder
+	for _, l := range links {
+		sbS.WriteString(l + "\n")
 	}
+	b64s := base64.StdEncoding.EncodeToString([]byte(sbS.String()))
 
-	base64Subscription := base64.StdEncoding.EncodeToString([]byte(subscriptionBuilder.String()))
 	fmt.Printf("\n%s--- Subscription Link (Base64 Encoded) ---%s\n", ColorCyan, ColorReset)
-	fmt.Println(ColorYellow + base64Subscription + ColorReset)
-	fmt.Printf("\n%sCopy this link and import it into your Sing-box client.%s\n", ColorGreen, ColorReset)
+	fmt.Println(ColorYellow + b64s + ColorReset)
+	fmt.Printf("\n%sCopy this link and import it into your Sing-box compatible client.%s\n", ColorGreen, ColorReset)
 }
 
-// cleanupInstallationFiles removes temporary files created during installation.
 func cleanupInstallationFiles() {
 	tempDir := os.TempDir()
 	patterns := []string{"sing-box-*.tar.gz", "sb-extract*"}
+	logInfo("Cleaning up temporary installation files from %s...", tempDir)
+
+	cleanedCount := 0
 	for _, pattern := range patterns {
-		items, err := filepath.Glob(filepath.Join(tempDir, pattern))
-		if err != nil {
-			fmt.Printf("%sWARN: Error globbing temp files for pattern %s: %v%s\n", ColorYellow, pattern, err, ColorReset)
-			continue
-		}
+		items, _ := filepath.Glob(filepath.Join(tempDir, pattern))
 		for _, item := range items {
 			info, err := os.Stat(item)
-			if err != nil {
-				fmt.Printf("%sWARN: Error stating temp file %s: %v%s\n", ColorYellow, item, err, ColorReset)
-				continue
-			}
-			if info.IsDir() {
-				if err := os.RemoveAll(item); err != nil {
-					fmt.Printf("%sWARN: Failed to remove temp directory %s: %v%s\n", ColorYellow, item, err, ColorReset)
-				}
-			} else {
-				if err := os.Remove(item); err != nil {
-					fmt.Printf("%sWARN: Failed to remove temp file %s: %v%s\n", ColorYellow, item, err, ColorReset)
+			if err == nil {
+				if info.IsDir() {
+					if err := os.RemoveAll(item); err == nil {
+						cleanedCount++
+					} else {
+						logWarn("Failed to remove directory: %s - %v", item, err)
+					}
+				} else {
+					if err := os.Remove(item); err == nil {
+						cleanedCount++
+					} else {
+						logWarn("Failed to remove file: %s - %v", item, err)
+					}
 				}
 			}
 		}
 	}
-	fmt.Printf("%sTemporary installation files cleaned up.%s\n", ColorGreen, ColorReset)
+	if cleanedCount > 0 {
+		logInfo("Temporary installation files cleaned up (%d items).", cleanedCount)
+	} else {
+		logInfo("No temporary installation files found to clean up.")
+	}
 }
 
-// restartSingBoxServiceInteractive restarts the Sing-box service.
 func restartSingBoxServiceInteractive() {
 	checkRoot()
 	restartSingBoxService()
 }
 
-// stopSingBoxServiceInteractive stops the Sing-box service.
 func stopSingBoxServiceInteractive() {
 	checkRoot()
-	fmt.Printf("%sStopping Sing-box service...%s\n", ColorYellow, ColorReset)
+	logInfo("Stopping Sing-box service...")
 	if _, err := runCommand("systemctl", "stop", "sing-box"); err != nil {
-		fmt.Printf("%sWARN: Sing-box service stop failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Sing-box service stop command failed: %v", err)
 	} else {
-		fmt.Printf("%sSing-box service stopped successfully.%s\n", ColorGreen, ColorReset)
+		logSuccess("Sing-box service stopped successfully.")
 	}
 }
 
-// startSingBoxServiceInteractive starts the Sing-box service.
 func startSingBoxServiceInteractive() {
 	checkRoot()
-	fmt.Printf("%sStarting Sing-box service...%s\n", ColorYellow, ColorReset)
+	logInfo("Starting Sing-box service...")
 	if _, err := runCommand("systemctl", "enable", "sing-box"); err != nil {
-		fmt.Printf("%sWARN: systemctl enable sing-box failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("systemctl enable sing-box failed: %v (service might not start on boot)", err)
 	}
 	if _, err := runCommand("systemctl", "start", "sing-box"); err != nil {
-		fmt.Printf("%sWARN: Sing-box service start failed: %v%s\n", ColorYellow, err, ColorReset)
+		logWarn("Sing-box service start command failed: %v", err)
 	} else {
-		fmt.Printf("%sSing-box service started successfully.%s\n", ColorGreen, ColorReset)
+		logSuccess("Sing-box service started successfully.")
 	}
 }
 
-// viewSingBoxLogs displays real-time Sing-box service logs using journalctl.
 func viewSingBoxLogs() {
-	fmt.Printf("%sDisplaying Sing-box logs (Ctrl+C to exit):%s\n", ColorYellow, ColorReset)
+	logInfo("Displaying Sing-box logs (use Ctrl+C to exit)...")
 	cmd := exec.Command("journalctl", "-u", "sing-box", "-f", "-e", "--no-pager")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
 	err := cmd.Run()
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
-			fmt.Printf("\n%sLog viewing ended with exit code: %v%s\n", ColorYellow, exitError.ExitCode(), ColorReset)
+			fmt.Printf("\n%sLog viewing ended (exit code: %d).%s\n", ColorYellow, exitError.ExitCode(), ColorReset)
 			return
 		}
-		fmt.Printf("%sLog viewing error: %v%s\n", ColorRed, err, ColorReset)
+		logError("Error viewing logs with journalctl: %v", err)
 	}
 }
 EOF_GO_CODE
-# --- END OF SB.GO CONTENT ---
-echo -e "${GREEN}sb.go script content written.${NC}"
+log_success "sb.go script content written to ${PROJECT_DIR}/sb.go"
 
 # --- 4. Initialize Go Module and Download Dependencies ---
-echo -e "${YELLOW}Initializing Go module and downloading dependencies...${NC}"
-
-# Check if go.mod already exists in the project directory
+log_info "Initializing Go Module in ${PROJECT_DIR}..."
 if [ ! -f "$PROJECT_DIR/go.mod" ]; then
-    go mod init singbox_manager_go
-    echo -e "${GREEN}Go module initialized.${NC}"
+    if go mod init sb_manager; then
+        log_success "Go module initialized."
+    else
+        log_error "'go mod init' failed. Check Go installation and permissions in ${PROJECT_DIR}."
+        exit 1
+    fi
 else
-    echo -e "${YELLOW}Go module already initialized (go.mod exists). Skipping 'go mod init'.${NC}"
+    log_warn "Go module (go.mod) already exists. Skipping 'go mod init'."
 fi
 
-go mod tidy
-echo -e "${GREEN}Go module dependencies synchronized.${NC}"
+log_info "Synchronizing Go module dependencies (go mod tidy)..."
+if go mod tidy; then
+    log_success "Go module dependencies synchronized."
+else
+    log_error "'go mod tidy' failed. Check internet connection or module paths."
+    exit 1
+fi
 
 # --- 5. Compile Go Script ---
-echo -e "${YELLOW}Compiling sb.go into an executable...${NC}"
-go build -o sb sb.go
-chmod +x sb
-echo -e "${GREEN}Compilation complete, executable file is: ${PROJECT_DIR}/sb${NC}"
+log_info "Compiling Sing-box Manager Executable (sb)..."
+if go build -ldflags="-s -w" -o sb sb.go; then
+    chmod +x sb
+    log_success "Compilation complete. Executable: ${PROJECT_DIR}/sb"
+else
+    log_error "Go compilation failed. Check sb.go for errors or Go environment."
+    exit 1
+fi
 
 # --- 6. Create Symlink to /usr/local/bin ---
-echo -e "${YELLOW}Creating symlink to /usr/local/bin/sb...${NC}"
-ln -sf "$PROJECT_DIR/sb" "/usr/local/bin/sb"
-echo -e "${GREEN}You can now run the manager using 'sudo sb' command.${NC}"
+log_info "Creating command symlink '/usr/local/bin/sb'..."
+TARGET_CLI_NAME="sb"
+if ln -sf "${PROJECT_DIR}/sb" "/usr/local/bin/${TARGET_CLI_NAME}"; then
+    log_success "You can now run the manager using: sudo ${TARGET_CLI_NAME}"
+else
+    log_error "Failed to create symlink. Check permissions for /usr/local/bin."
+fi
 
 # --- 7. Final Instructions ---
-echo -e "${CYAN}--- Installation environment prepared ---${NC}"
-echo -e "${CYAN}You can now start the Sing-box manager by typing: sudo sb${NC}"
-echo -e "${CYAN}Please follow the manager's prompts to install Sing-box itself and configure nodes.${NC}"
-echo -e "${YELLOW}If any errors occurred during Go installation or compilation, please review the output above.${NC}"
+echo ""
+echo -e "${CYAN}${BOLD}--- Installation Script Finished ---${NC}"
+echo -e "${CYAN}Sing-box Manager has been compiled to: ${GREEN}${PROJECT_DIR}/sb${NC}"
+if [ -L "/usr/local/bin/${TARGET_CLI_NAME}" ] && [ -x "/usr/local/bin/${TARGET_CLI_NAME}" ]; then
+    echo -e "${CYAN}You can start it by typing: ${GREEN}sudo ${TARGET_CLI_NAME}${NC}"
+else
+    echo -e "${YELLOW}Symlink creation failed or not verified.${NC}"
+    echo -e "${CYAN}You can run the manager directly using: ${GREEN}sudo ${PROJECT_DIR}/sb${NC}"
+fi
+echo -e "${CYAN}Follow the manager's prompts to install Sing-box and configure nodes.${NC}"
+echo -e "${YELLOW}If any errors occurred, please review the output above.${NC}"
 echo ""
 
-echo -e "${GREEN}Script execution finished.${NC}"
+log_success "Script execution finished."
