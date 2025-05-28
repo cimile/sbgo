@@ -1,6 +1,6 @@
 ubuntu debian
 
-wget https://github.com/cimile/sbgo/releases/download/untagged-a8d93897b289d3f4fc2f/install_sb.sh  
+wget https://github.com/cimile/sbgo/releases/download/sbgo/install_sb.sh
 
 sudo apt update                     
 
