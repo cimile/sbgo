@@ -12,4 +12,3 @@ chmod +x install_sb.sh
 
 bash ./install_sb.sh                     
 
-
